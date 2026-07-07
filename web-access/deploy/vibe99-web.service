@@ -1,0 +1,24 @@
+[Unit]
+Description=Vibe99 Web Access (persistent terminal sessions over WebSocket)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/FAST/Vibe99/web-access
+Environment=NODE_ENV=production
+Environment=VIBE99_WEB_CONFIG=%h/.config/vibe99-web/config.json
+# Node 22 from nvm; adjust the path if your node lives elsewhere (node -n? `which node`).
+ExecStart=%h/.nvm/versions/node/v22.22.3/bin/node /mnt/FAST/Vibe99/web-access/server/index.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+
+# Install (user session, no sudo needed):
+#   mkdir -p ~/.config/systemd/user
+#   cp /mnt/FAST/Vibe99/web-access/deploy/vibe99-web.service ~/.config/systemd/user/
+#   loginctl enable-linger $USER            # keep the user session (and this service) alive after logout
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vibe99-web
+# Logs: journalctl --user -u vibe99-web -f

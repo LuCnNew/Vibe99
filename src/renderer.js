@@ -31,30 +31,6 @@ function createUnavailableBridge() {
 
 const bridge = window.vibe99 ?? createUnavailableBridge();
 
-const initialPanes = [
-  {
-    id: 'p1',
-    title: null,
-    terminalTitle: bridge.defaultTabTitle,
-    cwd: bridge.defaultCwd,
-    accent: '#ff6b57',
-  },
-  {
-    id: 'p2',
-    title: null,
-    terminalTitle: bridge.defaultTabTitle,
-    cwd: bridge.defaultCwd,
-    accent: '#ff9f1c',
-  },
-  {
-    id: 'p3',
-    title: null,
-    terminalTitle: bridge.defaultTabTitle,
-    cwd: bridge.defaultCwd,
-    accent: '#ffd166',
-  },
-];
-
 const accentPalette = [
   '#ff6b57',
   '#ff9f1c',
@@ -68,9 +44,55 @@ const accentPalette = [
   '#f4a261',
 ];
 
+function accentForPaneId(paneId) {
+  const n = parseInt(String(paneId || '').replace(/\D/g, ''), 10);
+  return accentPalette[Number.isFinite(n) && n > 0 ? (n - 1) % accentPalette.length : 0];
+}
+
+// Convert a server-side pane descriptor (from boot layout / layout events) into
+// the renderer's pane model. The server is the source of truth for which panes
+// exist (p4+ persistence + multi-client layout sync).
+function paneFromServer(sp) {
+  const id = sp.paneId || sp.id;
+  return {
+    id,
+    title: sp.title ?? null,
+    terminalTitle: sp.title || sp.cwd || bridge.defaultTabTitle,
+    cwd: sp.cwd || bridge.defaultCwd,
+    accent: accentForPaneId(id),
+  };
+}
+
+const bootLayout = (() => {
+  const raw = window.__VIBE99_BOOT__ && Array.isArray(window.__VIBE99_BOOT__.panes)
+    ? window.__VIBE99_BOOT__.panes
+    : null;
+  return raw && raw.length ? raw.map(paneFromServer) : null;
+})();
+
+const initialPanes = bootLayout && bootLayout.length
+  ? bootLayout
+  : [
+      { id: 'p1', title: null, terminalTitle: bridge.defaultTabTitle, cwd: bridge.defaultCwd, accent: accentPalette[0] },
+      { id: 'p2', title: null, terminalTitle: bridge.defaultTabTitle, cwd: bridge.defaultCwd, accent: accentPalette[1] },
+      { id: 'p3', title: null, terminalTitle: bridge.defaultTabTitle, cwd: bridge.defaultCwd, accent: accentPalette[2] },
+    ];
+
 let panes = initialPanes.map((pane) => ({ ...pane }));
 let focusedPaneId = panes[0].id;
-let nextPaneNumber = panes.length + 1;
+let nextPaneNumber = panes.reduce((max, p) => {
+  const n = parseInt(String(p.id).replace(/\D/g, ''), 10);
+  return Number.isFinite(n) ? Math.max(max, n) : max;
+}, 0) + 1;
+const pendingLocalAdds = new Set(); // pane ids added locally but not yet confirmed by a server layout event
+const connectedClients = [];
+// Seed initial panes as pending so an empty server layout (fresh server, before
+// our createTerminal calls land) does not wipe them. Cleared when the server
+// confirms them via a layout event (or after a 3s safety timeout).
+for (const p of panes) {
+  pendingLocalAdds.add(p.id);
+  window.setTimeout(() => pendingLocalAdds.delete(p.id), 3000);
+}
 let renamingPaneId = null;
 let dragState = null;
 let isNavigationMode = false;
@@ -136,6 +158,55 @@ const removeMenuActionListener = bridge.onMenuAction(({ action, paneId }) => {
   } catch (error) {
     reportError(error);
   }
+});
+
+// Reconcile local `panes` to the server's authoritative layout (membership only;
+// local tab order/rename is preserved). ensurePaneNodes() then creates/disposes
+// terminal nodes for added/removed panes, and createTerminal reattaches (with
+// scrollback) for panes that already exist server-side.
+function reconcileLayout(layout) {
+  if (!layout || !Array.isArray(layout.panes)) return;
+  const serverById = new Map(layout.panes.map((sp) => [sp.paneId || sp.id, sp]));
+  const serverIds = new Set(serverById.keys());
+  for (const id of serverIds) pendingLocalAdds.delete(id);
+
+  for (const [id, sp] of serverById) {
+    if (!panes.find((p) => p.id === id)) {
+      panes = [...panes, paneFromServer(sp)];
+    }
+  }
+  panes = panes.filter((p) => serverIds.has(p.id) || pendingLocalAdds.has(p.id));
+
+  nextPaneNumber = panes.reduce((max, p) => {
+    const n = parseInt(String(p.id).replace(/\D/g, ''), 10);
+    return Number.isFinite(n) ? Math.max(max, n) : max;
+  }, 0) + 1;
+
+  if (!panes.find((p) => p.id === focusedPaneId)) {
+    focusedPaneId = panes[0]?.id ?? null;
+  }
+  render(true);
+}
+
+function renderClients() {
+  const el = document.getElementById('status-clients');
+  if (!el) return;
+  el.textContent = connectedClients.length
+    ? 'clients: ' + connectedClients.map((c) => c.name || c.id).join(', ')
+    : '';
+}
+
+const removeLayoutListener = bridge.onLayout?.((layout) => {
+  try {
+    reconcileLayout(layout);
+  } catch (error) {
+    reportError(error);
+  }
+});
+const removeClientsListener = bridge.onClients?.((payload) => {
+  connectedClients.length = 0;
+  if (payload && Array.isArray(payload.clients)) connectedClients.push(...payload.clients);
+  renderClients();
 });
 
 function reportError(error) {
@@ -549,9 +620,12 @@ function focusPane(paneId, options = {}) {
 
 function addPane() {
   const newPane = createPaneData();
+  pendingLocalAdds.add(newPane.id);
   panes = [...panes, newPane];
   focusedPaneId = newPane.id;
   render(true);
+  // safety: clear the pending flag if no server layout confirms it within 3s
+  window.setTimeout(() => pendingLocalAdds.delete(newPane.id), 3000);
 }
 
 function closePane(index, options = {}) {
