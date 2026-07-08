@@ -7,6 +7,34 @@
     <link rel="stylesheet" href="/node_modules/@xterm/xterm/css/xterm.css" />
     <link rel="stylesheet" href="/src/styles.css" />
     <!-- @VIBE99_BOOT@ -->
+    <script>
+      (function () {
+        function showBootError(message) {
+          var el = document.getElementById('boot-error');
+          if (!el) {
+            el = document.createElement('pre');
+            el.id = 'boot-error';
+            el.style.cssText =
+              'position:fixed;inset:12px;z-index:100000;margin:0;padding:12px;' +
+              'overflow:auto;white-space:pre-wrap;background:#2b1111;color:#ffd7d7;' +
+              'border:1px solid #884444;font:13px monospace;';
+            var append = function () {
+              document.body.appendChild(el);
+            };
+            if (document.body) append();
+            else document.addEventListener('DOMContentLoaded', append);
+          }
+          el.textContent = String(message || 'Unknown browser error');
+        }
+        window.addEventListener('error', function (event) {
+          showBootError((event.message || 'Error') + '\n' + (event.filename || '') + ':' + (event.lineno || 0));
+        });
+        window.addEventListener('unhandledrejection', function (event) {
+          var reason = event.reason;
+          showBootError(reason && reason.stack ? reason.stack : reason);
+        });
+      })();
+    </script>
   </head>
   <body>
     <div class="app-shell">
@@ -55,7 +83,7 @@
 
     <!-- Shim (classic) must run before the renderer module: it sets window.vibe99
          synchronously, which renderer.js reads at module top-level (renderer.js:32). -->
-    <script src="/web/vibe99-shim.js"></script>
-    <script type="module" src="/src/renderer.js"></script>
+    <script src="/web/vibe99-shim.js?v=20260707-debug2"></script>
+    <script type="module" src="/src/renderer.js?v=20260707-debug2"></script>
   </body>
 </html>

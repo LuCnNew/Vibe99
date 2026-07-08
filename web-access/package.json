@@ -3,13 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Web access layer for Vibe99 — persistent terminal sessions over WebSocket (Phase 1: single client).",
+  "description": "Web access layer for Vibe99 — persistent terminal sessions over WebSocket.",
   "engines": {
     "node": ">=22 <23"
   },
   "scripts": {
+    "setup": "node server/setup.js",
+    "doctor": "node server/doctor.js",
     "start": "node server/index.js",
-    "smoke:session": "node server/smoke-session.js"
+    "start:web": "node server/index.js",
+    "smoke:session": "node server/smoke-session.js",
+    "smoke:ws": "node server/smoke-ws.js",
+    "smoke:multi": "node server/smoke-ws-multi.js"
   },
   "dependencies": {
     "sirv": "^3.0.1",

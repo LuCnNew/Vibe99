@@ -13,7 +13,8 @@
 - 多客户端可同时连接（本机 + 远程），输出实时同步，状态栏显示谁在线。
 - bearer 令牌鉴权；默认走 VPN，不公网暴露。
 
-> 原生 Vibe99 桌面应用仍是可选的本地客户端；本访问层与 Vibe99 源码**分开存放**，只**只读复用**其前端资源与 node-pty。
+> 原生 Vibe99 桌面应用仍可独立使用；当前 Web Access 不接管桌面应用已有的私有 pty 会话。本访问层与
+> Vibe99 源码**分开存放**，只**只读复用**其前端资源与 node-pty。
 
 ---
 
@@ -23,6 +24,9 @@
 - **Vibe99 项目树已就位并装好依赖**：本服务**复用** Vibe99 的前端资源（`src/renderer.js`〔本分支已并入 layout 驱动改动〕、`styles.css`、`node_modules/@xterm/**` 只读复用）和 node-pty（`@homebridge/node-pty-prebuilt-multiarch` 的 prebuilt）。即 `staticRoot`（默认 `/mnt/FAST/Vibe99`）里得有 `src/renderer.js` 和已 `npm ci` 过的 `node_modules`。
   - 注意：本项目 `package.json` **不含 node-pty**——它从 Vibe99 的 node_modules 加载（避免 GitHub prebuilt 下载不稳）。所以 Vibe99 那边必须先装好。
 - 可达性：本机 `127.0.0.1`、VPN `10.8.0.154` 能到这台主机。
+- 防火墙：远程访问需要放行服务端口（默认 `7777/tcp`）。如果用 `ufw`，可先用
+  `sudo ufw allow 7777/tcp` 验证；生产上更建议限制到 OpenVPN 网段：
+  `sudo ufw allow in on tun0 from 10.8.0.0/24 to any port 7777 proto tcp`。
 
 ---
 
@@ -32,26 +36,9 @@
 cd /mnt/FAST/Vibe99/web-access
 nvm use 22
 npm ci                         # 只装 ws + sirv（纯 JS，很快）
-
-# 生成带强令牌的配置
-TOKEN=$(openssl rand -hex 24)
-mkdir -p ~/.config/vibe99-web
-node -e '
-  const fs=require("fs"), os=require("os"), path=require("path");
-  fs.writeFileSync(
-    path.join(os.homedir(),".config","vibe99-web","config.json"),
-    JSON.stringify({
-      port:7777, host:"0.0.0.0", token:process.argv[1],
-      staticRoot:"/mnt/FAST/Vibe99",
-      defaultCwd:os.homedir(), defaultTabTitle:"Vibe99",
-      scrollbackCapBytes:524288, maxSessions:16,
-      settingsFile:path.join(os.homedir(),".config","vibe99-web","settings.json")
-    }, null, 2));
-  console.log("token:", process.argv[1]);
-' "$TOKEN"
-
-# 启动
-VIBE99_WEB_CONFIG=~/.config/vibe99-web/config.json node server/index.js
+npm run setup                  # 生成 ~/.config/vibe99-web/config.json，并打印 token / URL
+npm run doctor                 # 检查 Node、配置、前端资源、node-pty、端口
+npm run start:web              # 启动服务
 # 看到 [info] listening host=0.0.0.0 port=7777 即成功
 ```
 
@@ -67,8 +54,11 @@ VIBE99_WEB_CONFIG=~/.config/vibe99-web/config.json node server/index.js
 
 - **多客户端**：开多个标签/设备都带上 `?token=...&name=...`，互不踢出，输出实时同步；状态栏显示 `clients: desk, travel`。
 - **输入**：自由写入（任一客户端都可输入；单用户场景不会两台设备同时敲键）。
-- **持久化**：关浏览器/断网再重连，同一组 pane 与正在跑的任务仍在，历史输出（scrollback）可见。
-- **加 pane**：点 `+` 或 `Ctrl/Cmd+T`；**刷新后所有 pane（含手动加的 p4+）都会回来**。
+- **本地输入的可见性**：远程看到的是同一个 pty 的输出流；shell 通常会回显输入，所以远程也会看到本地打出的命令。
+- **同时打字**：两个客户端若同时输入，字节会进入同一个终端流并可能交错；当前不做锁定/抢占。
+- **身份模型**：`name=` 只是客户端显示名，不是安全身份；`token` 才是访问凭据。当前是单用户、多客户端模型。
+- **持久化**：关浏览器/断网再重连，同一组 pane 与正在跑的任务仍在，历史输出（scrollback）可见；服务进程退出则会话丢失。
+- **加 pane**：点 `+` 或 `Ctrl/Cmd+T`；服务进程内刷新/重连后，所有 pane（含手动加的 p4+）都会回来。
 - **尺寸**：多客户端时终端取**最小尺寸**（tmux 式）——谁都不会被截断；大屏会有右侧留白（正常，不错位）。
 - **右键菜单 / 复制粘贴**：浏览器内右键菜单（文本）；非 HTTPS 网络下 `navigator.clipboard` 可能受限，用右键粘贴兜底。
 
@@ -112,9 +102,9 @@ journalctl --user -u vibe99-web -f       # 看日志
 
 ```bash
 export WS_TOKEN="$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.env.HOME+'/.config/vibe99-web/config.json','utf8')).token)")"
-node server/smoke-session.js     # 持久化核心：create→输出→再 create REATTACH 回放
-node server/smoke-ws.js          # 单客户端：错 token 拒绝 + create/write 往返
-node server/smoke-ws-multi.js    # 多客户端：layout/clients 广播 + scrollback 单播 + p4 同步
+npm run smoke:session            # 持久化核心：create→输出→再 create REATTACH 回放
+npm run smoke:ws                 # 单客户端：错 token 拒绝 + create/write 往返
+npm run smoke:multi              # 多客户端：layout/clients 广播 + scrollback 单播 + p4 同步
 ```
 
 三个都 `PASS` 即服务端正常。浏览器侧行为（渲染、状态栏、尺寸、多标签同步）需在真实浏览器确认。
@@ -136,7 +126,7 @@ SessionManager —— 持久 pty 会话（与客户端解耦）；createTerminal
 
 关键设计：
 - **会话持久**：pty 归 SessionManager 拥有，客户端断开不杀；仅服务端进程退出才全灭（ADR-002）。
-- **布局真相源**：服务端持有 pane 列表，客户端连接/刷新时从 boot 注入 + `layout` 事件对账（`src/renderer.js` 的 `reconcileLayout`），p4+ 因此可持久。
+- **布局真相源**：服务端持有 pane 列表，客户端连接/刷新时从 boot 注入 + `layout` 事件对账（`src/renderer.js` 的 `reconcileLayout`），p4+ 因此可在服务进程内接续。
 - **传输**：控制流文本 JSON（req/res/event，`messageId` 关联 Promise），终端数据二进制帧（`protocol.js`）。
 - **垫片**：`web/vibe99-shim.js` 实现与 Electron `window.vibe99` 同形状的接口，底层走 WebSocket；经典脚本先于 renderer 模块加载。
 
@@ -195,6 +185,7 @@ ADR/ specs/ URD.md HLD.md README.md BACKLOG.md ISSUES.md VERIFICATION_PLAN.md re
 | 浏览器空白 / 报错 | 开发者工具控制台；确认 `window.vibe99` 已由垫片注入；查 `journalctl --user -u vibe99-web` |
 | 终端不出现 | 确认 `staticRoot` 指向装好依赖的 Vibe99 树；`curl http://127.0.0.1:7777/src/renderer.js` 应返回 JS |
 | 连不上 / 401 | URL 里 `token` 是否正确；服务是否监听；VPN 是否通 |
+| OpenVPN 能 ping 但网页打不开 | 在 Windows 上用 `Test-NetConnection 10.8.0.154 -Port 7777`；若 `PingSucceeded=True` 但 `TcpTestSucceeded=False`，通常是主机防火墙没放行 `7777/tcp` |
 | `EADDRINUSE` | 端口被占（改 `port` 或停旧实例） |
 | pane 闪退/消失 | 确认跑的是最新代码（renderer 的 `pendingLocalAdds` 修复） |
 | 尺寸错位 | 多客户端取最小尺寸，大屏留白属正常；若全屏 TUI 错乱，确认所有客户端都上报了尺寸（聚焦该 pane 触发 refit） |

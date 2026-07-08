@@ -9,7 +9,7 @@ URD 保证"会话存续"——终端任务在本机持续运行，与客户端�
 ## Scope
 
 **拥有**：pty 的 spawn/resize/write/kill、每会话 scrollback 缓冲、会话注册表、查看者的 attach/detach。
-**委托**：输入资格判定（谁可写）→ ConcurrencyCoordinator；网络传输 → RealtimeGateway；布局/设置持久化 → WorkspacePersistence。
+**委托**：写入策略 → ConcurrencyCoordinator（当前自由写入）；网络传输 → RealtimeGateway；设置持久化 → WorkspacePersistence。
 
 ## Operational Envelope
 
@@ -30,7 +30,7 @@ URD 保证"会话存续"——终端任务在本机持续运行，与客户端�
 
 - `createSession({ cwd, cols, rows, shell? }) → sessionId`
 - `destroySession(sessionId)`
-- `write(sessionId, data)` —— 仅当调用方经 ConcurrencyCoordinator 授权
+- `write(sessionId, data)` —— 由 Gateway/ConcurrencyCoordinator 按 ADR-003 写入策略调用
 - `resize(sessionId, cols, rows)`
 - `attach(sessionId, viewer) → subscription`；subscription 产出 `{ data, exit }`
 - `detach(sessionId, viewer)`

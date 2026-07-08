@@ -6,5 +6,6 @@ origin_assets/*
 !origin_assets/README.md
 dist/
 out/
+.run/
 .DS_Store
 spec/

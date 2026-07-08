@@ -146,7 +146,7 @@
     var items = [];
     if (payload.kind === 'terminal') {
       items.push({ action: 'terminal-copy', label: 'Copy', enabled: !!payload.hasSelection });
-      items.push({ action: 'terminal-paste', label: 'Paste', enabled: !!payload.hasClipboardText });
+      items.push({ action: 'terminal-paste', label: 'Paste', enabled: true });
       items.push({ action: 'terminal-select-all', label: 'Select All', enabled: true });
     } else if (payload.kind === 'tab') {
       items.push({ action: 'tab-rename', label: 'Rename Tab', enabled: true });
@@ -193,7 +193,8 @@
     },
     writeClipboardText: function (p) {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText((p && p.text) || '').catch(function () {});
+        var text = typeof p === 'string' ? p : (p && p.text) || '';
+        navigator.clipboard.writeText(text).catch(function () {});
       }
       return Promise.resolve({});
     },

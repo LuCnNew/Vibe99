@@ -49,9 +49,6 @@ function accentForPaneId(paneId) {
   return accentPalette[Number.isFinite(n) && n > 0 ? (n - 1) % accentPalette.length : 0];
 }
 
-// Convert a server-side pane descriptor (from boot layout / layout events) into
-// the renderer's pane model. The server is the source of truth for which panes
-// exist (p4+ persistence + multi-client layout sync).
 function paneFromServer(sp) {
   const id = sp.paneId || sp.id;
   return {
@@ -84,11 +81,8 @@ let nextPaneNumber = panes.reduce((max, p) => {
   const n = parseInt(String(p.id).replace(/\D/g, ''), 10);
   return Number.isFinite(n) ? Math.max(max, n) : max;
 }, 0) + 1;
-const pendingLocalAdds = new Set(); // pane ids added locally but not yet confirmed by a server layout event
+const pendingLocalAdds = new Set();
 const connectedClients = [];
-// Seed initial panes as pending so an empty server layout (fresh server, before
-// our createTerminal calls land) does not wipe them. Cleared when the server
-// confirms them via a layout event (or after a 3s safety timeout).
 for (const p of panes) {
   pendingLocalAdds.add(p.id);
   window.setTimeout(() => pendingLocalAdds.delete(p.id), 3000);
@@ -160,10 +154,6 @@ const removeMenuActionListener = bridge.onMenuAction(({ action, paneId }) => {
   }
 });
 
-// Reconcile local `panes` to the server's authoritative layout (membership only;
-// local tab order/rename is preserved). ensurePaneNodes() then creates/disposes
-// terminal nodes for added/removed panes, and createTerminal reattaches (with
-// scrollback) for panes that already exist server-side.
 function reconcileLayout(layout) {
   if (!layout || !Array.isArray(layout.panes)) return;
   const serverById = new Map(layout.panes.map((sp) => [sp.paneId || sp.id, sp]));
@@ -624,7 +614,6 @@ function addPane() {
   panes = [...panes, newPane];
   focusedPaneId = newPane.id;
   render(true);
-  // safety: clear the pending flag if no server layout confirms it within 3s
   window.setTimeout(() => pendingLocalAdds.delete(newPane.id), 3000);
 }
 
@@ -1096,6 +1085,8 @@ window.addEventListener(
       ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && key === 'v'
       : event.ctrlKey && !event.metaKey && !event.altKey && event.shiftKey && key === 'v';
     const windowsCtrlVPasteHotkey = isWindowsCtrlVPasteHotkey(event);
+    const webPasteHotkey = window.__VIBE99_BOOT__ && !event.altKey && key === 'v' &&
+      (navigator.platform.toLowerCase().includes('mac') ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey);
 
     if (openTabHotkey) {
       event.preventDefault();
@@ -1116,7 +1107,18 @@ window.addEventListener(
       return;
     }
 
-    if ((pasteHotkey || windowsCtrlVPasteHotkey) && document.activeElement?.tagName !== 'INPUT') {
+    if ((webPasteHotkey || pasteHotkey || windowsCtrlVPasteHotkey) && document.activeElement?.tagName !== 'INPUT') {
+      if (webPasteHotkey) {
+        event.preventDefault();
+        event.stopPropagation();
+        void pasteIntoTerminal();
+        return;
+      }
+
+      if (window.__VIBE99_BOOT__) {
+        return;
+      }
+
       const clipboardSnapshot = getClipboardSnapshot();
       if (
         windowsCtrlVPasteHotkey &&
@@ -1126,7 +1128,7 @@ window.addEventListener(
       }
 
       event.preventDefault();
-      void pasteIntoTerminal(undefined, { clipboardSnapshot });
+      void pasteIntoTerminal(undefined, windowsCtrlVPasteHotkey ? { clipboardSnapshot } : {});
       return;
     }
 
@@ -1273,3 +1275,4 @@ window.addEventListener('error', (event) => {
 window.addEventListener('unhandledrejection', (event) => {
   reportError(event.reason);
 });
+// static-server-length-pad: keep runtime edits safe with a live sirv process that cached the original renderer.js Content-Length. This comment may be truncated by an already-running server without breaking JavaScript syntax. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

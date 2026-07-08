@@ -20,8 +20,8 @@ HLD 的 API Surface 与 WebFrontend 边界；ADR-001 复用既有渲染层。前
 
 - 渲染与桌面应用一致的多 pane、focus-first 工作区。
 - 瞬时断线后自动重连并回放 scrollback。
-- 反映 claim 状态（提示本客户端当前能否输入；提供"接管"入口）。
-- 仅在本客户端持有 claim 时才发送输入。
+- 支持自由写入：任一已连接客户端都可发送输入（ADR-003 修订）。
+- 展示连接中的客户端列表，帮助用户区分本地与远程浏览器。
 
 ## Structural Contract
 
@@ -32,6 +32,8 @@ HLD 的 API Surface 与 WebFrontend 边界；ADR-001 复用既有渲染层。前
   - 剪贴板/右键/外链 → 浏览器等价能力
 - **Transport 接口（可插拔）**：`send(op, payload)`；`on(type, handler)`。
   - 实现：`WebSocketTransport`（网页）、`IpcTransport`（遗留桌面，见 `SPEC_LegacyDesktopClient.md`）。
-- 由现有 `src/renderer.js`（1201 行）+ `src/index.html` + `src/styles.css` 改造而来；核心是替换传输层，另需以浏览器等价能力替换剪贴板/右键/外链，并加入断线重连与 scrollback 回放。
+- 由现有 `src/renderer.js` + `src/index.html` + `src/styles.css` 改造而来；核心是替换传输层，
+  另需以浏览器等价能力替换剪贴板/右键/外链，并加入断线重连与 scrollback 回放。
 
-> **Phase 2 更新（多客户端）**：**fork 为 `web/renderer.js`**（不再只读复用上游）；`initialPanes` 改为来自服务端 `layout`（经 boot 注入；无则回退 p1/p2/p3），并监听 `layout` 事件动态增删 pane（p4+ 持久化与多客户端布局同步）；状态栏显示连接中的客户端列表（来自 `clients` 事件）。
+> **Phase 2 更新（多客户端）**：继续复用根目录 `src/renderer.js`；`initialPanes` 改为来自服务端
+> `layout`（经 boot 注入；无则回退 p1/p2/p3），并监听 `layout` 事件动态增删 pane（p4+ 在服务进程内接续与多客户端布局同步）；状态栏显示连接中的客户端列表（来自 `clients` 事件）。

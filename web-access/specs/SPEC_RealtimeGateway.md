@@ -8,8 +8,8 @@ HLD 跨边界决策：单一持久实时通道；鉴权在边缘统一进行。�
 
 ## Scope
 
-**拥有**：WebFrontend 静态资源的 HTTP 托管、实时连接的 accept/生命周期、报文封装与路由、鉴权强制（校验委托 AuthN）。
-**委托**：会话操作 → SessionManager；并发仲裁 → ConcurrencyCoordinator；鉴权判定 → AuthN。
+**拥有**：WebFrontend 静态资源的 HTTP 托管、实时连接的 accept/生命周期、报文封装与路由、鉴权强制（校验委托 AuthN）、客户端列表广播、最小尺寸协调。
+**委托**：会话操作 → SessionManager；写入策略 → ConcurrencyCoordinator；鉴权判定 → AuthN。
 
 ## Operational Envelope
 
@@ -20,8 +20,8 @@ HLD 跨边界决策：单一持久实时通道；鉴权在边缘统一进行。�
 ## Behavioral Contract
 
 - 握手阶段拒绝未鉴权连接。
-- 把客户端请求（create/write/resize/destroy/list/attach/settings）路由到对应模块。
-- 把会话事件（data/exit/claim-changed/layout）回送到发起方及广播客户端。
+- 把客户端请求（terminal-create/write/resize/destroy、settings、clipboard/menu 降级操作）路由到对应模块。
+- 把会话事件（terminal data、terminal exit、layout、clients）回送到发起方或广播给全部客户端。
 - 单个客户端断开不影响任何会话。
 
 ## Structural Contract
@@ -31,8 +31,9 @@ HLD 跨边界决策：单一持久实时通道；鉴权在边缘统一进行。�
 - 连接事件：`'connect'(conn)`、`'disconnect'(conn)`、`'message'(conn, msg)`
 - 出站：`send(conn, msg)`、`broadcast(paneId, msg)`
 - 报文封装镜像遗留 `window.vibe99` 操作：
-  - 请求：`{ op: 'terminal-create' | 'terminal-write' | 'terminal-resize' | 'terminal-destroy' | 'settings-load' | 'settings-save' | 'attach' | 'list' | 'claim' | 'release', payload }`
-  - 事件：`{ type: 'terminal-data' | 'terminal-exit' | 'claim-changed' | 'layout', payload }`
+  - 文本请求：`terminal-create`、`terminal-resize`、`terminal-destroy`、`settings-load`、`settings-save`
+  - 文本事件：`hello`、`terminal-exit`、`layout`、`clients`
+  - 二进制帧：terminal write/data、reattach scrollback
 
 > 传输：WebSocket；终端数据用二进制帧。
 

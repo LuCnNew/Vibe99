@@ -11,8 +11,8 @@
 ### 2. 多写入者输入冲突（终端单流本质）
 
 - **Impact**：多客户端并发敲键会互相冲突，可能向 shell/agent 注入错误命令。
-- **Constraints**：ADR-003 选"每 pane 单一活跃写入者"模型。
-- **Future Direction**：claim UX 优化（focus 自动 claim、接管提示、宽限窗口调参）。
+- **Constraints**：ADR-003 修订为自由写入；这是单用户场景下的低摩擦取舍。
+- **Future Direction**：如果未来引入多用户或协作场景，再启用 claim / focus-claim 仲裁与接管提示。
 
 ### 3. 网页暴露 = 主机 shell 暴露（高价值目标）
 
