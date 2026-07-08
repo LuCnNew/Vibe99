@@ -2,10 +2,10 @@
   "port": 7777,
   "host": "0.0.0.0",
   "token": "REPLACE_WITH_LONG_RANDOM_SECRET",
-  "staticRoot": "/mnt/FAST/Vibe99",
-  "defaultCwd": "/home/test",
+  "staticRoot": "/path/to/Vibe99",
+  "defaultCwd": "/home/you",
   "defaultTabTitle": "Vibe99",
   "scrollbackCapBytes": 524288,
   "maxSessions": 16,
-  "settingsFile": "/home/test/.config/vibe99-web/settings.json"
+  "settingsFile": "/home/you/.config/vibe99-web/settings.json"
 }

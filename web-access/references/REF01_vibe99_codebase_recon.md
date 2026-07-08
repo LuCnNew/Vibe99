@@ -1,7 +1,7 @@
 # REF01 — Vibe99 现有代码库勘察
 
 > **Subject**：现有 Vibe99（NekoApocalypse v0.4.5，Electron）的架构勘察——为 web 改造提供事实基线。
-> **Source**：`/mnt/FAST/Vibe99` 代码库（`electron/main.js`、`electron/preload.js`、`electron/pty.js`、`src/renderer.js`、`package.json`），2026-07-07 勘察。
+> **Source**：Vibe99 仓库根目录（`electron/main.js`、`electron/preload.js`、`electron/pty.js`、`src/renderer.js`、`package.json`），2026-07-07 勘察。
 
 ## Content
 

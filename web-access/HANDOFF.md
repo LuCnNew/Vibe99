@@ -1,6 +1,6 @@
 # HANDOFF — Vibe99 Web Access
 
-> **BLUF**：这是一个让 Vibe99 终端工作区在**浏览器**里打开的访问层——本机 `127.0.0.1:<port>`、VPN 远程 `10.8.0.154:<port>`。终端会话**持久存活**（关浏览器不灭），支持**多客户端同时连接**，刷新/重连后回到同一组窗口（含手动加的 pane）与历史输出。面向接手这个功能的同事。
+> **BLUF**：这是一个让 Vibe99 终端工作区在**浏览器**里打开的访问层——本机 `127.0.0.1:<port>`、VPN/LAN 远程 `<HOST_IP>:<port>`。终端会话**持久存活**（关浏览器不灭），支持**多客户端同时连接**，刷新/重连后回到同一组窗口（含手动加的 pane）与历史输出。面向接手这个功能的同事。
 
 ---
 
@@ -21,9 +21,9 @@
 ## 2. 前置条件
 
 - **Node 22**（匹配 Vibe99 `.nvmrc`；用 nvm：`nvm use 22`）。
-- **Vibe99 项目树已就位并装好依赖**：本服务**复用** Vibe99 的前端资源（`src/renderer.js`〔本分支已并入 layout 驱动改动〕、`styles.css`、`node_modules/@xterm/**` 只读复用）和 node-pty（`@homebridge/node-pty-prebuilt-multiarch` 的 prebuilt）。即 `staticRoot`（默认 `/mnt/FAST/Vibe99`）里得有 `src/renderer.js` 和已 `npm ci` 过的 `node_modules`。
+- **Vibe99 项目树已就位并装好依赖**：本服务**复用** Vibe99 的前端资源（`src/renderer.js`〔本分支已并入 layout 驱动改动〕、`styles.css`、`node_modules/@xterm/**` 只读复用）和 node-pty（`@homebridge/node-pty-prebuilt-multiarch` 的 prebuilt）。即 `staticRoot`（默认自动推导为仓库根目录）里得有 `src/renderer.js` 和已 `npm ci` 过的 `node_modules`。
   - 注意：本项目 `package.json` **不含 node-pty**——它从 Vibe99 的 node_modules 加载（避免 GitHub prebuilt 下载不稳）。所以 Vibe99 那边必须先装好。
-- 可达性：本机 `127.0.0.1`、VPN `10.8.0.154` 能到这台主机。
+- 可达性：本机 `127.0.0.1`、VPN/LAN `<HOST_IP>` 能到这台主机。
 - 防火墙：远程访问需要放行服务端口（默认 `7777/tcp`）。如果用 `ufw`，可先用
   `sudo ufw allow 7777/tcp` 验证；生产上更建议限制到 OpenVPN 网段：
   `sudo ufw allow in on tun0 from 10.8.0.0/24 to any port 7777 proto tcp`。
@@ -33,7 +33,7 @@
 ## 3. 快速开始
 
 ```bash
-cd /mnt/FAST/Vibe99/web-access
+cd <repo>/web-access
 nvm use 22
 npm ci                         # 只装 ws + sirv（纯 JS，很快）
 npm run setup                  # 生成 ~/.config/vibe99-web/config.json，并打印 token / URL
@@ -44,7 +44,7 @@ npm run start:web              # 启动服务
 
 浏览器打开（把 `<TOKEN>` 换成上面打印的）：
 - 本机：`http://127.0.0.1:7777/?token=<TOKEN>&name=desk`
-- 远程（VPN）：`http://10.8.0.154:7777/?token=<TOKEN>&name=travel`
+- 远程（VPN/LAN）：`http://<HOST_IP>:7777/?token=<TOKEN>&name=travel`
 
 > `&name=` 是可选项，用于在状态栏区分客户端（会存 localStorage）。不带则用服务端分配的 id。
 
@@ -71,7 +71,7 @@ npm run start:web              # 启动服务
 | `port` | 监听端口 | 7777 |
 | `host` | 绑定地址（`0.0.0.0` = 全部接口；见 §9 安全） | 0.0.0.0 |
 | `token` | bearer 令牌（≥16 字符，越随机越好） | 必填 |
-| `staticRoot` | Vibe99 项目根（提供 src/ + node_modules） | /mnt/FAST/Vibe99 |
+| `staticRoot` | Vibe99 项目根（提供 src/ + node_modules） | 自动推导为仓库根目录 |
 | `defaultCwd` | 新 pane 的默认工作目录 | $HOME |
 | `defaultTabTitle` | 默认标签标题 | Vibe99 |
 | `scrollbackCapBytes` | 每 pane scrollback 上限 | 524288（512KB） |
@@ -114,7 +114,7 @@ npm run smoke:multi              # 多客户端：layout/clients 广播 + scroll
 ## 8. 架构速览（详见 `URD/HLD/ADR/specs`）
 
 ```
-浏览器 (127.0.0.1 / 10.8.0.154)
+浏览器 (127.0.0.1 / <HOST_IP>)
    │  HTTP GET /            → web/index.html（网关注入 boot：platform/cwd/panes）
    │  HTTP GET /src/**, /node_modules/@xterm/**, /web/**  → 只读复用 Vibe99 资源
    │  WS  /ws?token=&name=  → RealtimeGateway（sirv + ws，同端口；边缘鉴权）
@@ -137,7 +137,7 @@ SessionManager —— 持久 pty 会话（与客户端解耦）；createTerminal
 - **令牌即 shell 访问**：浏览器访问 ≈ 在主机上开终端。令牌泄露 = 主机 shell。务必用强随机令牌、走 VPN、不外传。
 - **`host: 0.0.0.0` 暴露面**：默认绑定所有接口（含非 VPN 的 LAN）。令牌鉴权兜底，但建议用防火墙把该端口限制到 VPN 接口/loopback（纵深防御）。
 - **令牌在 URL**：`?token=` 会进浏览器历史。可接受于私有部署；未来可用 WebSocket 子协议传递以减少暴露。
-- **非 HTTPS**：`http://10.8.0.154` 非安全上下文，`navigator.clipboard` 可能受限（右键粘贴兜底），且流量不加密（依赖 VPN 加密）。
+- **非 HTTPS**：`http://<HOST_IP>` 非安全上下文，`navigator.clipboard` 可能受限（右键粘贴兜底），且流量不加密（依赖 VPN 加密）。
 
 ---
 
@@ -185,7 +185,7 @@ ADR/ specs/ URD.md HLD.md README.md BACKLOG.md ISSUES.md VERIFICATION_PLAN.md re
 | 浏览器空白 / 报错 | 开发者工具控制台；确认 `window.vibe99` 已由垫片注入；查 `journalctl --user -u vibe99-web` |
 | 终端不出现 | 确认 `staticRoot` 指向装好依赖的 Vibe99 树；`curl http://127.0.0.1:7777/src/renderer.js` 应返回 JS |
 | 连不上 / 401 | URL 里 `token` 是否正确；服务是否监听；VPN 是否通 |
-| OpenVPN 能 ping 但网页打不开 | 在 Windows 上用 `Test-NetConnection 10.8.0.154 -Port 7777`；若 `PingSucceeded=True` 但 `TcpTestSucceeded=False`，通常是主机防火墙没放行 `7777/tcp` |
+| OpenVPN 能 ping 但网页打不开 | 在 Windows 上用 `Test-NetConnection <HOST_IP> -Port 7777`；若 `PingSucceeded=True` 但 `TcpTestSucceeded=False`，通常是主机防火墙没放行 `7777/tcp` |
 | `EADDRINUSE` | 端口被占（改 `port` 或停旧实例） |
 | pane 闪退/消失 | 确认跑的是最新代码（renderer 的 `pendingLocalAdds` 修复） |
 | 尺寸错位 | 多客户端取最小尺寸，大屏留白属正常；若全屏 TUI 错乱，确认所有客户端都上报了尺寸（聚焦该 pane 触发 refit） |

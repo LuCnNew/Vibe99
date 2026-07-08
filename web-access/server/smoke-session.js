@@ -4,9 +4,14 @@
 import { SessionManager } from './session-manager.js';
 import { loadPty } from './pty-loader.js';
 import { decodeBinary, BIN_WRITE, BIN_SCROLLBACK } from './protocol.js';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const defaultStaticRoot = path.resolve(__dirname, '..', '..');
 
 const config = {
-  staticRoot: process.env.VIBE99_STATIC_ROOT || '/mnt/FAST/Vibe99',
+  staticRoot: process.env.VIBE99_STATIC_ROOT || defaultStaticRoot,
   defaultCwd: process.env.HOME,
   scrollbackCapBytes: 524288,
   maxSessions: 16,

@@ -1,11 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const defaultStaticRoot = path.resolve(__dirname, '..', '..');
 
 const DEFAULTS = {
   port: 7777,
   host: '0.0.0.0',
-  staticRoot: '/mnt/FAST/Vibe99',
+  staticRoot: defaultStaticRoot,
   defaultCwd: os.homedir(),
   defaultTabTitle: 'Vibe99',
   scrollbackCapBytes: 524288,

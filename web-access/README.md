@@ -1,7 +1,7 @@
 # Vibe99 Web Access
 
 Vibe99 Web Access 把 Vibe99 的多 pane 终端工作区放到浏览器里，并让终端任务在浏览器断开后继续运行。
-你可以在本机打开 `127.0.0.1:<port>`，也可以在 VPN 内从另一台设备打开 `10.8.0.154:<port>`。
+你可以在本机打开 `127.0.0.1:<port>`，也可以在 VPN 或局域网内从另一台设备打开 `<HOST_IP>:<port>`。
 
 先说边界：Web Access 能接续的是**在这个网页工作区里启动的任务**，因为这些任务由 Web Access 服务持有。
 它不能接管系统里任意已经运行的终端，也不能自动接管旧 Electron 桌面应用已经启动的私有 pty 会话。
@@ -26,62 +26,74 @@ Vibe99 Web Access 把 Vibe99 的多 pane 终端工作区放到浏览器里，并
 这些都在运行终端任务的主机上准备。
 
 - Node 22。
-- Vibe99 项目位于 `/mnt/FAST/Vibe99`。
+- npm 能访问 registry；如果安装依赖失败，先配置 npm registry / proxy。
+- 已 clone 本仓库；下面用 `<repo>` 表示你的仓库根目录。
 - Vibe99 根项目依赖已安装，因为 Web Access 会复用：
-  - `/mnt/FAST/Vibe99/src/renderer.js`
-  - `/mnt/FAST/Vibe99/src/styles.css`
-  - `/mnt/FAST/Vibe99/node_modules/@xterm/**`
-  - `/mnt/FAST/Vibe99/node_modules/@homebridge/node-pty-prebuilt-multiarch`
-- 如果要远程访问，远程设备需要能通过 VPN 访问 `10.8.0.154:<port>`。
+  - `<repo>/src/renderer.js`
+  - `<repo>/src/styles.css`
+  - `<repo>/node_modules/@xterm/**`
+  - `<repo>/node_modules/@homebridge/node-pty-prebuilt-multiarch`
+- 如果要远程访问，远程设备需要能通过 VPN 或局域网访问 `<HOST_IP>:<port>`。
 - 主机防火墙需要放行 Web Access 端口；默认端口是 `7777`。
 
 ## 第一次 Setup
 
 以下命令都在主机上执行。
 
-1. 进入项目并使用 Node 22。
+### 推荐：根目录一键 setup
+
+1. 进入仓库根目录并使用 Node 22。
 
 ```bash
-cd /mnt/FAST/Vibe99
+cd <repo>
 nvm use 22
 node -v
 ```
 
-2. 如果根项目还没有安装依赖，先安装根项目依赖。
+如果 npm 下载慢或失败，先按你的网络环境配置 registry，例如：
 
 ```bash
-npm ci
+npm config set registry https://registry.npmmirror.com
 ```
 
-3. 安装 Web Access 自己的依赖。
+2. 安装根项目依赖、安装 Web Access 依赖、生成配置并检查环境。
 
 ```bash
-cd /mnt/FAST/Vibe99/web-access
-npm ci
+npm run setup:web
 ```
 
-4. 创建配置文件，并生成强随机 token。
+如果配置已经存在，脚本不会覆盖。需要重建配置时运行：
 
 ```bash
+npm run setup:web -- --force
+```
+
+### 手动 setup
+
+如果不用一键脚本，可以手动执行：
+
+```bash
+cd <repo>
+nvm use 22
+npm ci
+cd web-access
+npm ci
 npm run setup
+npm run doctor
 ```
 
 脚本会写入 `~/.config/vibe99-web/config.json`，并打印 token 和本机访问 URL。保存打印出来的 token。
 这个 token 等同于打开主机 shell 的权限，不要发给不可信的人。
 
-如果配置已经存在，脚本不会覆盖。需要重建配置时运行：
+如果配置已经存在，`npm run setup` 不会覆盖。需要重建配置时运行：
 
 ```bash
 npm run setup -- --force
 ```
 
-5. 检查环境。
+### 启动服务
 
-```bash
-npm run doctor
-```
-
-6. 前台启动服务。
+在仓库根目录运行：
 
 ```bash
 npm run start:web
@@ -93,13 +105,13 @@ npm run start:web
 [info] listening host=0.0.0.0 port=7777
 ```
 
-7. 在本机浏览器打开：
+打开本机浏览器：
 
 ```text
 http://127.0.0.1:7777/?token=<TOKEN>&name=desk
 ```
 
-把 `<TOKEN>` 换成 `npm run setup` 打印的 token。`name=desk` 是可选的客户端名称，会显示在状态栏里，方便区分
+把 `<TOKEN>` 换成 `npm run setup:web` 或 `npm run setup` 打印的 token。`name=desk` 是可选的客户端名称，会显示在状态栏里，方便区分
 本机和远程浏览器。
 
 ## 在本机启动任务
@@ -113,7 +125,7 @@ http://127.0.0.1:7777/?token=<TOKEN>&name=desk
 示例：
 
 ```bash
-cd /mnt/FAST/Vibe99
+cd <repo>
 codex
 ```
 
@@ -128,7 +140,7 @@ codex
 3. 在远程浏览器打开：
 
 ```text
-http://10.8.0.154:7777/?token=<TOKEN>&name=travel
+http://<HOST_IP>:7777/?token=<TOKEN>&name=travel
 ```
 
 4. 如果浏览器提示无法访问，先确认主机防火墙放行了端口。最简单的 `ufw` 规则是：
@@ -170,11 +182,15 @@ sudo ufw allow in on tun0 from 10.8.0.0/24 to any port 7777 proto tcp
 1. 安装 service 模板。
 
 ```bash
+cd <repo>
 mkdir -p "$HOME/.config/systemd/user"
-cp /mnt/FAST/Vibe99/web-access/deploy/vibe99-web.service "$HOME/.config/systemd/user/"
+sed \
+  -e "s#__VIBE99_REPO__#$(pwd)#g" \
+  -e "s#__NODE_BIN__#$(command -v node)#g" \
+  web-access/deploy/vibe99-web.service > "$HOME/.config/systemd/user/vibe99-web.service"
 ```
 
-2. 检查复制后的 unit，确保 `ExecStart` 指向你的 Node 22。
+2. 检查生成后的 unit。
 
 ```bash
 systemctl --user edit --full vibe99-web
@@ -196,7 +212,7 @@ journalctl --user -u vibe99-web -f
 
 ## 无浏览器验证
 
-在 `/mnt/FAST/Vibe99/web-access` 下运行：
+在 `<repo>/web-access` 下运行：
 
 ```bash
 npm run smoke:session
@@ -259,10 +275,10 @@ SessionManager
 ## 故障排查
 
 - **页面空白**：打开浏览器 devtools，确认 `/web/vibe99-shim.js` 和 `/src/renderer.js` 加载成功。
-- **终端不出现**：确认 `staticRoot` 指向 `/mnt/FAST/Vibe99`，且根项目 `node_modules` 存在。
+- **终端不出现**：确认 `staticRoot` 指向仓库根目录，且根项目 `node_modules` 存在。
 - **Unauthorized / disconnected**：检查 URL 里的 token 和服务日志。
 - **远程连不上**：检查 VPN、主机防火墙，以及服务是否监听 `0.0.0.0:7777`。如果远程设备能
-  `ping 10.8.0.154`，但 `Test-NetConnection 10.8.0.154 -Port 7777` 显示
+  `ping <HOST_IP>`，但 `Test-NetConnection <HOST_IP> -Port 7777` 显示
   `TcpTestSucceeded : False`，通常是主机防火墙没有放行端口；可先执行
   `sudo ufw allow 7777/tcp` 验证。
 - **端口占用**：修改 `config.json` 里的 `port`，或停掉旧服务。

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { loadConfig } from './config.js';
 import { loadPty } from './pty-loader.js';
@@ -9,7 +11,10 @@ import { RealtimeGateway } from './gateway.js';
 import { logger } from './logger.js';
 
 function main() {
-  const configPath = process.env.VIBE99_WEB_CONFIG || path.join(process.cwd(), 'config.json');
+  const homeConfigPath = path.join(os.homedir(), '.config', 'vibe99-web', 'config.json');
+  const localConfigPath = path.join(process.cwd(), 'config.json');
+  const configPath = process.env.VIBE99_WEB_CONFIG ||
+    (fs.existsSync(homeConfigPath) ? homeConfigPath : localConfigPath);
   const config = loadConfig(configPath);
   logger.info(`config loaded from ${configPath}`);
 

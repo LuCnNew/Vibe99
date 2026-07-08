@@ -61,4 +61,4 @@ console.log(`wrote config: ${configPath}`);
 console.log(`staticRoot: ${staticRoot}`);
 console.log(`token: ${token}`);
 console.log(`local URL: http://127.0.0.1:${port}/?token=${token}&name=desk`);
-console.log('remote URL: replace host with the VPN address, for example 10.8.0.154');
+console.log(`remote URL: http://<HOST_IP>:${port}/?token=${token}&name=laptop`);
