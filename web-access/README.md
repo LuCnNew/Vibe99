@@ -25,7 +25,8 @@ Vibe99 Web Access 把 Vibe99 的多 pane 终端工作区放到浏览器里，并
 
 这些都在运行终端任务的主机上准备。
 
-- Node 22。
+- Ubuntu 22.04 或更新版本。Ubuntu 20.04 不支持。
+- Node 22。推荐用 `nvm` 安装。
 - npm 能访问 registry；如果安装依赖失败，先配置 npm registry / proxy。
 - 已 clone 本仓库；下面用 `<repo>` 表示你的仓库根目录。
 - Vibe99 根项目依赖已安装，因为 Web Access 会复用：
@@ -44,11 +45,18 @@ Vibe99 Web Access 把 Vibe99 的多 pane 终端工作区放到浏览器里，并
 
 1. 进入仓库根目录并使用 Node 22。
 
+`nvm` 是 Node 版本管理器；Node 22 装好后会自带 npm，通常不用单独安装 npm。
+如果还没有 `nvm`，先按 nvm 官方 README 安装：<https://github.com/nvm-sh/nvm#installing-and-updating>。
+
 ```bash
 cd <repo>
+nvm install 22
 nvm use 22
 node -v
+npm -v
 ```
+
+如果 `npm -v` 没有输出，重新打开终端，或者再运行一次 `nvm use 22`。
 
 如果 npm 下载慢或失败，先按你的网络环境配置 registry，例如：
 

@@ -34,6 +34,40 @@ function npmInstallArgs(cwd) {
   return fs.existsSync(path.join(cwd, 'package-lock.json')) ? ['ci'] : ['install'];
 }
 
+function readOsRelease() {
+  try {
+    return Object.fromEntries(
+      fs.readFileSync('/etc/os-release', 'utf8')
+        .split('\n')
+        .map((line) => line.match(/^([A-Z_]+)=(.*)$/))
+        .filter(Boolean)
+        .map((match) => [match[1], match[2].replace(/^"|"$/g, '')]),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function checkOs() {
+  if (process.platform !== 'linux') {
+    console.error('Vibe99 Web Access is supported on Ubuntu 22.04 or newer.');
+    process.exit(1);
+  }
+
+  const osRelease = readOsRelease();
+  if (osRelease.ID !== 'ubuntu') {
+    console.warn('Warning: supported target is Ubuntu 22.04 or newer.');
+    return;
+  }
+
+  const major = Number(String(osRelease.VERSION_ID || '').split('.')[0]);
+  if (!Number.isFinite(major) || major < 22) {
+    console.error(`Ubuntu ${osRelease.VERSION_ID || 'unknown'} is not supported.`);
+    console.error('Use Ubuntu 22.04 or newer.');
+    process.exit(1);
+  }
+}
+
 function checkNode() {
   const major = Number(process.versions.node.split('.')[0]);
   if (major !== 22) {
@@ -45,6 +79,7 @@ function checkNode() {
   }
 }
 
+checkOs();
 checkNode();
 
 if (!skipInstall) {

@@ -16,13 +16,22 @@ VPN / 局域网里的另一台电脑继续访问同一组终端任务。
 
 在运行终端任务的主机上准备：
 
-- Linux 主机。
-- Node.js 22 和 npm。
+- Ubuntu 22.04 或更新版本。Ubuntu 20.04 不支持。
+- Node.js 22。推荐用 `nvm` 安装。
 - Git。
 - npm 能访问 registry，用来安装 Electron、xterm 和 node-pty 依赖。
 - 如果要远程访问，笔记本需要能通过 VPN 或局域网访问主机 IP。
 
-如果你使用 `nvm`：
+`nvm`、Node、npm 的关系：
+
+- `nvm` 是 Node 版本管理器，用来安装和切换 Node。
+- Node.js 是运行 JavaScript 的环境。
+- `npm` 是 Node 的包管理器。用 `nvm install 22` 安装 Node 22 时，npm 会一起装好，通常不用单独安装 npm。
+
+如果还没有 `nvm`，先按 nvm 官方 README 安装：<https://github.com/nvm-sh/nvm#installing-and-updating>。
+安装后重新打开终端，或执行它提示的 `source ...` 命令。
+
+然后安装 Node 22：
 
 ```bash
 nvm install 22
@@ -30,6 +39,8 @@ nvm use 22
 node -v
 npm -v
 ```
+
+如果 `npm -v` 没有输出，通常是 Node 还没激活。重新打开终端，或者再运行一次 `nvm use 22`。
 
 如果 `npm ci` 下载慢或失败，先配置你自己的 npm registry / proxy，再运行 setup。示例：
 
