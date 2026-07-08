@@ -89,6 +89,7 @@ for (const p of panes) {
 }
 let renamingPaneId = null;
 let dragState = null;
+let dragFrameId = null;
 let isNavigationMode = false;
 let pendingTabFocus = null;
 
@@ -345,16 +346,9 @@ function getPaneLeft(index, previewWidth, focusedIndex) {
   return focusedLeft + settings.paneWidth + (index - focusedIndex - 1) * previewWidth;
 }
 
-function createTab(pane, index, focusedIndex, dragMeta) {
+function createTab(pane, index, focusedIndex) {
   const tab = document.createElement('div');
   tab.className = `tab${index === focusedIndex ? ' is-focused' : ''}`;
-  if (dragMeta?.isDragging) {
-    tab.classList.add('is-dragging');
-    tab.style.transform = `translateX(${dragMeta.offsetX}px)`;
-  }
-  if (dragMeta?.insertBefore) {
-    tab.classList.add('insert-before');
-  }
   tab.style.setProperty('--pane-accent', pane.accent);
   tab.dataset.paneId = pane.id;
   tab.addEventListener('contextmenu', (event) => {
@@ -756,7 +750,7 @@ function handleTabPointerMove(event) {
 
   dragState.hasMoved = true;
   dragState.dropIndex = getTabDropIndex(event.clientX);
-  renderTabs();
+  scheduleTabDrag();
 }
 
 function handleTabPointerUp(event) {
@@ -781,6 +775,14 @@ function handleTabPointerUp(event) {
 }
 
 function endTabDrag() {
+  if (dragFrameId !== null) {
+    cancelAnimationFrame(dragFrameId);
+    dragFrameId = null;
+  }
+  for (const tab of tabsListEl.querySelectorAll('.tab')) {
+    tab.classList.remove('is-dragging', 'insert-before');
+    tab.style.transform = '';
+  }
   dragState = null;
   document.body.classList.remove('is-dragging-tabs');
   window.removeEventListener('pointermove', handleTabPointerMove);
@@ -789,42 +791,47 @@ function endTabDrag() {
 }
 
 function getTabDropIndex(clientX) {
-  const tabElements = [...tabsListEl.querySelectorAll('.tab')].filter(
-    (tab) => tab.dataset.paneId !== dragState?.paneId
-  );
+  const tabs = [...tabsListEl.querySelectorAll('.tab')].filter((tab) => tab.dataset.paneId !== dragState.paneId);
 
-  let slot = 0;
-  for (const tab of tabElements) {
-    const rect = tab.getBoundingClientRect();
-    if (clientX < rect.left + rect.width / 2) {
-      return slot;
-    }
-    slot += 1;
+  for (let slot = 0; slot < tabs.length; slot += 1) {
+    const r = tabs[slot].getBoundingClientRect();
+    if (clientX < r.left + r.width / 2) return slot;
   }
 
-  return slot;
+  return tabs.length;
+}
+
+function scheduleTabDrag() {
+  if (dragFrameId !== null) return;
+  dragFrameId = requestAnimationFrame(applyTabDrag);
+}
+
+function applyTabDrag() {
+  dragFrameId = null;
+  if (!dragState.hasMoved) return;
+
+  const draggedTab = [...tabsListEl.querySelectorAll('.tab')].find((tab) => tab.dataset.paneId === dragState.paneId);
+  const offsetX = dragState.currentX - dragState.startX;
+  let slot = 0;
+
+  for (const tab of tabsListEl.querySelectorAll('.tab')) {
+    const isDragged = tab === draggedTab;
+    tab.classList.toggle('is-dragging', isDragged);
+    tab.style.transform = isDragged ? `translate3d(${offsetX}px, 0, 0)` : '';
+
+    if (isDragged) {
+      tab.classList.remove('insert-before');
+      continue;
+    }
+
+    tab.classList.toggle('insert-before', dragState.dropIndex === slot);
+    slot += 1;
+  }
 }
 
 function renderTabs() {
   const focusedIndex = getFocusedIndex();
-  const draggedPaneId = dragState?.paneId ?? null;
-  let slot = 0;
-
-  tabsListEl.replaceChildren(
-    ...panes.map((pane, index) => {
-      const isDragging = pane.id === draggedPaneId && dragState?.hasMoved;
-      const insertBefore = !isDragging && dragState?.hasMoved && dragState.dropIndex === slot;
-      const dragMeta = {
-        isDragging,
-        insertBefore,
-        offsetX: isDragging ? dragState.currentX - dragState.startX : 0,
-      };
-      if (!isDragging) {
-        slot += 1;
-      }
-      return createTab(pane, index, focusedIndex, dragMeta);
-    })
-  );
+  tabsListEl.replaceChildren(...panes.map((pane, index) => createTab(pane, index, focusedIndex)));
 }
 
 function renderPanes(refit = false) {
@@ -843,7 +850,7 @@ function renderPanes(refit = false) {
     node.root.classList.toggle('is-focused', isFocused);
     node.root.classList.toggle('is-navigation-target', isFocused && isNavigationMode);
     node.root.style.setProperty('--pane-accent', pane.accent);
-    node.root.style.left = `${left}px`;
+    node.root.style.transform = `translate3d(${left}px, 0, 0)`;
     node.root.style.zIndex = String(index + 1);
     node.root.style.height = `${stageHeight}px`;
 

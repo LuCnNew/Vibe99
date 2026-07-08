@@ -87,6 +87,8 @@ body {
   z-index: 20;
   transition: none;
   background: rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+  will-change: transform;
 }
 
 .tab.insert-before::before {
@@ -277,6 +279,7 @@ body {
 .pane {
   position: absolute;
   top: 0;
+  left: 0;
   bottom: 0;
   width: var(--pane-width);
   border: 2px solid var(--pane-accent);
@@ -290,9 +293,10 @@ body {
   overflow: hidden;
   cursor: pointer;
   transition:
-    left 150ms cubic-bezier(0.2, 0.85, 0.32, 1),
+    transform 150ms cubic-bezier(0.2, 0.85, 0.32, 1),
     box-shadow 120ms ease;
-  will-change: left;
+  will-change: transform;
+  contain: layout paint;
 }
 
 .pane-shell {
