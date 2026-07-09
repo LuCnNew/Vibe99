@@ -25,6 +25,12 @@ const UNAUTH_CODE = 4401;
 const jsMime = 'text/javascript; charset=utf-8';
 const HEARTBEAT_MS = 30000;
 
+function setNoStoreHeaders(res) {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+}
+
 export class RealtimeGateway {
   constructor({ config, auth, sessions, settings, concurrency }) {
     this._config = config;
@@ -46,6 +52,7 @@ export class RealtimeGateway {
       dev: false,
       single: false,
       setHeaders: (res, pathname) => {
+        setNoStoreHeaders(res);
         if (pathname.endsWith('.mjs') || pathname.endsWith('.js')) {
           res.setHeader('Content-Type', jsMime);
         }
@@ -97,12 +104,14 @@ export class RealtimeGateway {
     const bootScript = `<script>window.__VIBE99_BOOT__ = ${JSON.stringify(boot)};</script>`;
     html = html.replace('<!-- @VIBE99_BOOT@ -->', bootScript);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    setNoStoreHeaders(res);
     res.end(html);
   }
 
   _serveFile(res, filePath, mime) {
     try {
       res.setHeader('Content-Type', mime);
+      setNoStoreHeaders(res);
       res.end(fs.readFileSync(filePath));
     } catch (e) {
       res.statusCode = 500;
@@ -213,8 +222,14 @@ export class RealtimeGateway {
           break;
         }
         case OPS.TERMINAL_RESIZE: {
-          this._recordSize(client, payload.paneId, payload.cols, payload.rows); // min-size applied inside
           reply(encodeResponseOk(id, {}));
+          setImmediate(() => {
+            try {
+              this._recordSize(client, payload.paneId, payload.cols, payload.rows); // min-size applied inside
+            } catch (e) {
+              logger.warn(`resize failed client=${client.id} pane=${payload.paneId}: ${e.message}`);
+            }
+          });
           break;
         }
         case OPS.TERMINAL_DESTROY:

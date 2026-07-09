@@ -464,6 +464,10 @@ function createPane(pane) {
   terminal.loadAddon(webLinksAddon);
   terminal.open(terminalHost);
   terminal.attachCustomKeyEventHandler((event) => {
+    if (isWebPasteHotkey(event)) {
+      return false;
+    }
+
     if (!isWindowsCtrlVPasteHotkey(event)) {
       return true;
     }
@@ -486,6 +490,10 @@ function createPane(pane) {
   };
 
   terminalHost.addEventListener('contextmenu', (event) => {
+    if (window.__VIBE99_BOOT__) {
+      return;
+    }
+
     event.preventDefault();
     focusPane(node.paneId, { focusTerminal: false });
     void showTerminalContextMenu(node, event);
@@ -527,10 +535,12 @@ function fitTerminal(node, force = false) {
   const nextSizeKey = `${cols}x${rows}`;
 
   if (node.sessionReady && (force || nextSizeKey !== node.sizeKey)) {
-    bridge.resizeTerminal({
+    void bridge.resizeTerminal({
       paneId: node.paneId,
       cols,
       rows,
+    }).catch((error) => {
+      console.warn('resizeTerminal ignored:', error);
     });
   }
 
@@ -912,6 +922,21 @@ function isWindowsCtrlVPasteHotkey(event) {
   );
 }
 
+function isBrowserMac() {
+  return navigator.platform.toLowerCase().includes('mac');
+}
+
+function isWebPasteHotkey(event) {
+  return Boolean(
+    window.__VIBE99_BOOT__ &&
+    !event.altKey &&
+    event.key.toLowerCase() === 'v' &&
+    (isBrowserMac()
+      ? event.metaKey && !event.ctrlKey
+      : event.ctrlKey && !event.metaKey)
+  );
+}
+
 function shouldDelegateWindowsCtrlVToTerminal(clipboardSnapshot) {
   return Boolean(clipboardSnapshot.hasImage && !clipboardSnapshot.text);
 }
@@ -931,14 +956,9 @@ function copyTerminalSelection(paneId = focusedPaneId) {
   return true;
 }
 
-async function pasteIntoTerminal(paneId = focusedPaneId, options = {}) {
+function writeTextToTerminal(text, paneId = focusedPaneId) {
   const node = getPaneNode(paneId);
-  if (!node?.sessionReady) {
-    return false;
-  }
-
-  const text = options.clipboardSnapshot?.text ?? (await bridge.readClipboardText());
-  if (!text) {
+  if (!node?.sessionReady || !text) {
     return false;
   }
 
@@ -948,6 +968,11 @@ async function pasteIntoTerminal(paneId = focusedPaneId, options = {}) {
     bridge.writeTerminal({ paneId: node.paneId, data: text });
   }
   return true;
+}
+
+async function pasteIntoTerminal(paneId = focusedPaneId, options = {}) {
+  const text = options.clipboardSnapshot?.text ?? (await bridge.readClipboardText());
+  return writeTextToTerminal(text, paneId);
 }
 
 function selectAllInTerminal(paneId = focusedPaneId) {
@@ -1092,8 +1117,7 @@ window.addEventListener(
       ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && key === 'v'
       : event.ctrlKey && !event.metaKey && !event.altKey && event.shiftKey && key === 'v';
     const windowsCtrlVPasteHotkey = isWindowsCtrlVPasteHotkey(event);
-    const webPasteHotkey = window.__VIBE99_BOOT__ && !event.altKey && key === 'v' &&
-      (navigator.platform.toLowerCase().includes('mac') ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey);
+    const webPasteHotkey = isWebPasteHotkey(event);
 
     if (openTabHotkey) {
       event.preventDefault();
@@ -1116,9 +1140,8 @@ window.addEventListener(
 
     if ((webPasteHotkey || pasteHotkey || windowsCtrlVPasteHotkey) && document.activeElement?.tagName !== 'INPUT') {
       if (webPasteHotkey) {
-        event.preventDefault();
-        event.stopPropagation();
-        void pasteIntoTerminal();
+        // Browser clipboard reads are often blocked on remote HTTP pages. Let
+        // Chrome dispatch a native paste event with clipboardData instead.
         return;
       }
 
@@ -1158,6 +1181,25 @@ window.addEventListener(
     if (event.key === 'Enter') {
       event.preventDefault();
       focusPane(focusedPaneId);
+    }
+  },
+  true
+);
+
+window.addEventListener(
+  'paste',
+  (event) => {
+    if (!window.__VIBE99_BOOT__ || document.activeElement?.tagName === 'INPUT') {
+      return;
+    }
+
+    const text =
+      event.clipboardData?.getData('text/plain') ||
+      event.clipboardData?.getData('text') ||
+      '';
+    if (writeTextToTerminal(text)) {
+      event.preventDefault();
+      event.stopPropagation();
     }
   },
   true

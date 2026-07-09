@@ -131,6 +131,14 @@
     return Promise.resolve({});
   }
 
+  function sendResizeRequest(payload) {
+    if (!ready) return Promise.resolve({});
+    sendRequest('terminal-resize', payload).catch(function (e) {
+      console.warn('terminal-resize ignored:', e && e.message ? e.message : e);
+    });
+    return Promise.resolve({});
+  }
+
   // --- browser-side context menu (mirrors main.js menu items) ---
   var menuEl = null;
   function closeMenu() {
@@ -182,7 +190,7 @@
     defaultTabTitle: BOOT.defaultTabTitle,
     createTerminal: function (p) { return sendRequest('terminal-create', p); },
     writeTerminal: function (p) { return sendWriteBinary(p.paneId, p.data); },
-    resizeTerminal: function (p) { return sendRequest('terminal-resize', p); },
+    resizeTerminal: function (p) { return sendResizeRequest(p); },
     destroyTerminal: function (p) { return sendRequest('terminal-destroy', p); },
     closeWindow: function () { try { window.close(); } catch (e) {} return sendRequest('window-close', {}); },
     readClipboardText: function () {
