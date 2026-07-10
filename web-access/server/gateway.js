@@ -31,6 +31,38 @@ function setNoStoreHeaders(res) {
   res.setHeader('Expires', '0');
 }
 
+function setLongCacheHeaders(res) {
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+}
+
+function isNodeModulePath(pathname) {
+  return pathname.replace(/\\/g, '/').startsWith('/node_modules/');
+}
+
+function contentTypeForPath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.css') return 'text/css; charset=utf-8';
+  if (ext === '.html') return 'text/html; charset=utf-8';
+  if (ext === '.js' || ext === '.mjs') return jsMime;
+  if (ext === '.json') return 'application/json; charset=utf-8';
+  if (ext === '.svg') return 'image/svg+xml';
+  return 'application/octet-stream';
+}
+
+function resolveStaticPath(root, pathname) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  if (!decoded || decoded.includes('\0')) return null;
+  const rootPath = path.resolve(root);
+  const filePath = path.resolve(rootPath, decoded.replace(/^\/+/, ''));
+  if (filePath !== rootPath && !filePath.startsWith(rootPath + path.sep)) return null;
+  return filePath;
+}
+
 export class RealtimeGateway {
   constructor({ config, auth, sessions, settings, concurrency }) {
     this._config = config;
@@ -43,6 +75,7 @@ export class RealtimeGateway {
     this._server = null;
     this._wss = null;
     this._heartbeat = null;
+    this._paneMinSizes = new Map();
     // SessionManager broadcasts live output / exit to all clients.
     this._sessions.setBroadcastSink((frame) => this._broadcast(frame));
   }
@@ -52,7 +85,7 @@ export class RealtimeGateway {
       dev: false,
       single: false,
       setHeaders: (res, pathname) => {
-        setNoStoreHeaders(res);
+        setLongCacheHeaders(res);
         if (pathname.endsWith('.mjs') || pathname.endsWith('.js')) {
           res.setHeader('Content-Type', jsMime);
         }
@@ -63,7 +96,8 @@ export class RealtimeGateway {
       const pathname = (req.url || '/').split('?')[0];
       if (pathname === '/' || pathname === '/index.html') return this._serveIndex(res);
       if (pathname === '/web/vibe99-shim.js') return this._serveFile(res, SHIM_PATH, jsMime);
-      serveStatic(req, res);
+      if (isNodeModulePath(pathname)) return serveStatic(req, res);
+      return this._serveProjectStatic(res, pathname);
     };
 
     this._server = http.createServer(handler);
@@ -110,12 +144,40 @@ export class RealtimeGateway {
 
   _serveFile(res, filePath, mime) {
     try {
+      const data = fs.readFileSync(filePath);
       res.setHeader('Content-Type', mime);
       setNoStoreHeaders(res);
-      res.end(fs.readFileSync(filePath));
+      res.setHeader('Content-Length', data.byteLength);
+      res.end(data);
     } catch (e) {
       res.statusCode = 500;
       res.end('read error: ' + e.message);
+    }
+  }
+
+  _serveProjectStatic(res, pathname) {
+    const filePath = resolveStaticPath(this._config.staticRoot, pathname);
+    if (!filePath) {
+      res.statusCode = 404;
+      res.end('not found');
+      return;
+    }
+    try {
+      const stats = fs.statSync(filePath);
+      if (!stats.isFile()) {
+        res.statusCode = 404;
+        res.end('not found');
+        return;
+      }
+      const data = fs.readFileSync(filePath);
+      res.setHeader('Content-Type', contentTypeForPath(filePath));
+      res.setHeader('Content-Length', data.byteLength);
+      res.setHeader('Last-Modified', stats.mtime.toUTCString());
+      setNoStoreHeaders(res);
+      res.end(data);
+    } catch {
+      res.statusCode = 404;
+      res.end('not found');
     }
   }
 
@@ -266,7 +328,13 @@ export class RealtimeGateway {
   // --- min-size reconciliation (ADR-005) ---
   _recordSize(client, paneId, cols, rows) {
     if (!paneId || !Number.isFinite(cols) || !Number.isFinite(rows)) return;
-    client.sizes.set(paneId, { cols: Math.max(20, cols | 0), rows: Math.max(8, rows | 0) });
+    const next = { cols: Math.max(20, cols | 0), rows: Math.max(8, rows | 0) };
+    const prev = client.sizes.get(paneId);
+    const changed = !prev || prev.cols !== next.cols || prev.rows !== next.rows;
+    client.sizes.set(paneId, next);
+    if (changed) {
+      logger.info(`resize report client=${client.id} name=${client.name} pane=${paneId} size=${next.cols}x${next.rows}`);
+    }
     this._recomputeMin(paneId);
   }
 
@@ -279,7 +347,24 @@ export class RealtimeGateway {
       minC = minC === null ? s.cols : Math.min(minC, s.cols);
       minR = minR === null ? s.rows : Math.min(minR, s.rows);
     }
-    if (minC !== null) this._sessions.resize(paneId, minC, minR);
+    if (minC !== null) {
+      const nextKey = `${minC}x${minR}`;
+      const prevKey = this._paneMinSizes.get(paneId);
+      if (prevKey !== nextKey) {
+        logger.info(`resize min pane=${paneId} ${prevKey || 'none'} -> ${nextKey} clients=${this._describePaneSizes(paneId)}`);
+        this._paneMinSizes.set(paneId, nextKey);
+      }
+      this._sessions.resize(paneId, minC, minR);
+    }
+  }
+
+  _describePaneSizes(paneId) {
+    const parts = [];
+    for (const c of this._clients.values()) {
+      const s = c.sizes.get(paneId);
+      if (s) parts.push(`${c.name}/${c.id}=${s.cols}x${s.rows}`);
+    }
+    return parts.join(',');
   }
 
   _recomputeMinAll() {

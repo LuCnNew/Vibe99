@@ -94,6 +94,8 @@ let isNavigationMode = false;
 let pendingTabFocus = null;
 
 const paneNodeMap = new Map();
+const WINDOW_RESIZE_DEBOUNCE_MS = 150;
+const TERMINAL_RESIZE_DEBOUNCE_MS = 120;
 
 const stageEl = document.getElementById('stage');
 const tabsListEl = document.getElementById('tabs-list');
@@ -116,6 +118,7 @@ const settings = {
   paneWidth: 720,
 };
 let pendingSettingsSave = null;
+let windowResizeTimer = null;
 
 const removeTerminalDataListener = bridge.onTerminalData(({ paneId, data }) => {
   const node = paneNodeMap.get(paneId);
@@ -487,6 +490,8 @@ function createPane(pane) {
     sizeKey: '',
     needsFit: true,
     accent: pane.accent,
+    resizeTimer: null,
+    pendingResize: null,
   };
 
   terminalHost.addEventListener('contextmenu', (event) => {
@@ -535,17 +540,33 @@ function fitTerminal(node, force = false) {
   const nextSizeKey = `${cols}x${rows}`;
 
   if (node.sessionReady && (force || nextSizeKey !== node.sizeKey)) {
-    void bridge.resizeTerminal({
-      paneId: node.paneId,
-      cols,
-      rows,
-    }).catch((error) => {
-      console.warn('resizeTerminal ignored:', error);
-    });
+    scheduleTerminalResize(node, cols, rows);
   }
 
   node.sizeKey = nextSizeKey;
   node.needsFit = false;
+}
+
+function scheduleTerminalResize(node, cols, rows) {
+  node.pendingResize = { cols, rows };
+  if (node.resizeTimer !== null) {
+    window.clearTimeout(node.resizeTimer);
+  }
+  node.resizeTimer = window.setTimeout(() => {
+    node.resizeTimer = null;
+    const next = node.pendingResize;
+    node.pendingResize = null;
+    if (!next || !node.sessionReady) {
+      return;
+    }
+    void bridge.resizeTerminal({
+      paneId: node.paneId,
+      cols: next.cols,
+      rows: next.rows,
+    }).catch((error) => {
+      console.warn('resizeTerminal ignored:', error);
+    });
+  }, TERMINAL_RESIZE_DEBOUNCE_MS);
 }
 
 async function initializePaneTerminal(node) {
@@ -566,6 +587,9 @@ function ensurePaneNodes() {
   for (const [paneId, node] of paneNodeMap.entries()) {
     if (!activeIds.has(paneId)) {
       bridge.destroyTerminal({ paneId });
+      if (node.resizeTimer !== null) {
+        window.clearTimeout(node.resizeTimer);
+      }
       node.terminal.dispose();
       node.root.remove();
       paneNodeMap.delete(paneId);
@@ -1293,11 +1317,17 @@ window.addEventListener('keydown', (event) => {
 });
 
 window.addEventListener('resize', () => {
-  try {
-    render(true);
-  } catch (error) {
-    reportError(error);
+  if (windowResizeTimer !== null) {
+    window.clearTimeout(windowResizeTimer);
   }
+  windowResizeTimer = window.setTimeout(() => {
+    windowResizeTimer = null;
+    try {
+      render(true);
+    } catch (error) {
+      reportError(error);
+    }
+  }, WINDOW_RESIZE_DEBOUNCE_MS);
 });
 
 window.addEventListener('DOMContentLoaded', async () => {
@@ -1311,6 +1341,9 @@ window.addEventListener('DOMContentLoaded', async () => {
 });
 
 window.addEventListener('beforeunload', () => {
+  if (windowResizeTimer !== null) {
+    window.clearTimeout(windowResizeTimer);
+  }
   flushSettingsSave();
   removeTerminalDataListener();
   removeTerminalExitListener();
@@ -1324,4 +1357,3 @@ window.addEventListener('error', (event) => {
 window.addEventListener('unhandledrejection', (event) => {
   reportError(event.reason);
 });
-// static-server-length-pad: keep runtime edits safe with a live sirv process that cached the original renderer.js Content-Length. This comment may be truncated by an already-running server without breaking JavaScript syntax. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
