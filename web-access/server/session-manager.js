@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { encodeBinary, encodeEvent, BIN_WRITE, BIN_SCROLLBACK } from './protocol.js';
+import { encodeBinary, encodeEvent, BIN_WRITE } from './protocol.js';
+
+const OUTPUT_BATCH_MS = 4;
+const OUTPUT_BATCH_BYTES = 32 * 1024;
 
 function isExecutableFile(filePath) {
   try {
@@ -40,15 +43,13 @@ function getSpawnWorkingDirectory(cwd, fallback) {
 }
 
 // SessionManager owns persistent terminal sessions (ptys), independent of client
-// connections. createTerminal is IDEMPOTENT (reattach + replay scrollback, no
-// respawn). Phase 2: layout is the source of truth; live output is BROADCAST to
-// all clients; reattach scrollback is UNICAST to the requesting client only
-// (so other already-connected clients don't get a duplicate replay).
+// connections. Output history is a bounded chunk deque with byte sequence
+// offsets, allowing clients to unsubscribe and later catch up incrementally.
 export class SessionManager {
   constructor({ pty, config, broadcast = null }) {
     this._pty = pty;
     this._config = config;
-    this._broadcast = broadcast; // (frame: string|Buffer) => void ; null when no clients
+    this._broadcast = broadcast; // (frame, {paneId}?) => void ; null when no clients
     this._sessions = new Map(); // paneId -> Session
   }
 
@@ -64,25 +65,22 @@ export class SessionManager {
       rows: s.rows,
       cwd: s.cwd,
       title: s.title,
+      outputSeq: s.nextSeq,
     }));
   }
 
-  // unicast: optional (frame)=>void to the requesting client; used so reattach
-  // scrollback is sent only to that client. Falls back to broadcast if absent.
-  createTerminal({ paneId, cols, rows, cwd }, unicast = null) {
+  createTerminal({ paneId, cols, rows, cwd }) {
     const existing = this._sessions.get(paneId);
 
     if (existing && existing.alive) {
       // Do NOT resize here: the Gateway owns pty sizing via min-size (ADR-005).
-      // Just replay scrollback to the requesting client (unicast).
-      const sink = unicast || ((f) => this._broadcast?.(f));
-      if (existing.scrollback.length) {
-        sink(encodeBinary(BIN_SCROLLBACK, paneId, existing.scrollback.toString('utf8')));
-      }
-      return { paneId, reattached: true };
+      return { paneId, reattached: true, outputSeq: existing.nextSeq };
     }
 
-    if (existing) this._destroyPty(existing);
+    if (existing) {
+      this._destroyPty(existing);
+      this._sessions.delete(paneId);
+    }
     if (this._sessions.size >= this._config.maxSessions) {
       const err = new Error(`maxSessions (${this._config.maxSessions}) reached`);
       err.code = 'MAX_SESSIONS';
@@ -112,7 +110,12 @@ export class SessionManager {
     const session = {
       paneId,
       pty: ptyProc,
-      scrollback: Buffer.alloc(0),
+      history: [],
+      historyBytes: 0,
+      nextSeq: 0,
+      pendingOutput: [],
+      pendingOutputBytes: 0,
+      outputTimer: null,
       alive: true,
       cols: Math.max(20, cols || 80),
       rows: Math.max(8, rows || 24),
@@ -122,7 +125,44 @@ export class SessionManager {
     ptyProc.onData((data) => this._onPtyData(paneId, data));
     ptyProc.onExit((exit) => this._onPtyExit(paneId, exit.exitCode));
     this._sessions.set(paneId, session);
-    return { paneId, reattached: false };
+    return { paneId, reattached: false, outputSeq: 0 };
+  }
+
+  getOutputSince(paneId, afterSeq = 0) {
+    const s = this._sessions.get(paneId);
+    if (!s) {
+      const err = new Error(`terminal not found: ${paneId}`);
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    // Make pending PTY output part of the same ordered snapshot.
+    this._flushOutput(s);
+    const earliestSeq = s.history.length ? s.history[0].seq : s.nextSeq;
+    const requestedSeq = Number.isSafeInteger(afterSeq) && afterSeq >= 0 ? afterSeq : 0;
+    let reset = requestedSeq < earliestSeq || requestedSeq > s.nextSeq;
+    let fromSeq = reset ? earliestSeq : requestedSeq;
+    // A malformed/stale client may request the middle of a UTF-8 code point.
+    // Advance to the next valid boundary and force a terminal reset.
+    for (const chunk of s.history) {
+      const endSeq = chunk.seq + chunk.data.length;
+      if (fromSeq <= chunk.seq || fromSeq >= endSeq) continue;
+      let offset = fromSeq - chunk.seq;
+      while (offset < chunk.data.length && (chunk.data[offset] & 0xc0) === 0x80) offset += 1;
+      const alignedSeq = chunk.seq + offset;
+      if (alignedSeq !== fromSeq) {
+        fromSeq = alignedSeq;
+        reset = true;
+      }
+      break;
+    }
+    const chunks = [];
+    for (const chunk of s.history) {
+      const endSeq = chunk.seq + chunk.data.length;
+      if (endSeq <= fromSeq) continue;
+      const offset = Math.max(0, fromSeq - chunk.seq);
+      chunks.push({ seq: chunk.seq + offset, data: chunk.data.subarray(offset) });
+    }
+    return { reset, fromSeq, toSeq: s.nextSeq, chunks };
   }
 
   write(paneId, data) {
@@ -158,29 +198,71 @@ export class SessionManager {
   _onPtyData(paneId, data) {
     const s = this._sessions.get(paneId);
     if (!s) return;
-    this._appendScrollback(s, data);
-    this._broadcast?.(encodeBinary(BIN_WRITE, paneId, data));
+    const buf = Buffer.from(data, 'utf8');
+    if (!buf.length) return;
+    s.pendingOutput.push(buf);
+    s.pendingOutputBytes += buf.length;
+    if (s.pendingOutputBytes >= OUTPUT_BATCH_BYTES) {
+      this._flushOutput(s);
+    } else if (!s.outputTimer) {
+      s.outputTimer = setTimeout(() => this._flushOutput(s), OUTPUT_BATCH_MS);
+    }
   }
 
   _onPtyExit(paneId, exitCode) {
     const s = this._sessions.get(paneId);
     if (!s) return;
+    this._flushOutput(s);
     s.alive = false;
-    this._broadcast?.(encodeEvent('terminal-exit', { paneId, exitCode }));
+    this._sessions.delete(paneId);
+    this._broadcast?.(
+      encodeEvent('terminal-exit', { paneId, exitCode }),
+      { paneId, ordered: true },
+    );
   }
 
-  _appendScrollback(session, data) {
-    const buf = Buffer.concat([session.scrollback, Buffer.from(data, 'utf8')]);
+  _flushOutput(session) {
+    if (session.outputTimer) {
+      clearTimeout(session.outputTimer);
+      session.outputTimer = null;
+    }
+    if (!session.pendingOutputBytes) return;
+    const data = session.pendingOutput.length === 1
+      ? session.pendingOutput[0]
+      : Buffer.concat(session.pendingOutput, session.pendingOutputBytes);
+    session.pendingOutput = [];
+    session.pendingOutputBytes = 0;
+    const seq = session.nextSeq;
+    session.nextSeq += data.length;
+    this._appendHistory(session, seq, data);
+    this._broadcast?.(encodeBinary(BIN_WRITE, session.paneId, data), { paneId: session.paneId });
+  }
+
+  _appendHistory(session, seq, data) {
     const cap = this._config.scrollbackCapBytes;
-    if (buf.length > cap) {
-      const drop = Math.min(buf.length - cap + Math.floor(cap * 0.1), buf.length);
-      session.scrollback = buf.subarray(drop);
-    } else {
-      session.scrollback = buf;
+    let kept = data;
+    let keptSeq = seq;
+    if (kept.length > cap) {
+      let start = kept.length - cap;
+      while (start < kept.length && (kept[start] & 0xc0) === 0x80) start += 1;
+      keptSeq += start;
+      // Copy the retained tail so a tiny history window does not pin a very
+      // large one-off PTY output buffer through subarray's shared backing store.
+      kept = Buffer.from(kept.subarray(start));
+      session.history = [];
+      session.historyBytes = 0;
+    }
+    session.history.push({ seq: keptSeq, data: kept });
+    session.historyBytes += kept.length;
+    while (session.historyBytes > cap && session.history.length > 1) {
+      const dropped = session.history.shift();
+      session.historyBytes -= dropped.data.length;
     }
   }
 
   _destroyPty(session) {
+    if (session.outputTimer) clearTimeout(session.outputTimer);
+    session.outputTimer = null;
     try { session.pty.kill(); } catch {}
     session.alive = false;
   }

@@ -16,19 +16,29 @@
   var NAME = new URLSearchParams(location.search).get('name') || localStorage.getItem('vibe99.name') || '';
   if (NAME) localStorage.setItem('vibe99.name', NAME);
 
-  var subs = { data: new Set(), exit: new Set(), menu: new Set(), layout: new Set(), clients: new Set() };
+  var subs = {
+    data: new Set(),
+    exit: new Set(),
+    menu: new Set(),
+    layout: new Set(),
+    clients: new Set(),
+    resync: new Set(),
+    connection: new Set(),
+  };
   var pending = new Map(); // messageId -> {resolve, reject, op}
   var msgSeq = 0;
   var ws = null;
   var ready = false;
   var queued = []; // request senders waiting for ws open
   var reconnectTimer = null;
+  var textDecoder = new TextDecoder();
 
   function wsUrl() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var q = '';
     if (TOKEN) q += (q ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
     if (NAME) q += (q ? '&' : '?') + 'name=' + encodeURIComponent(NAME);
+    q += (q ? '&' : '?') + 'protocol=2';
     return proto + '//' + location.host + '/ws' + q;
   }
 
@@ -45,12 +55,15 @@
       var q = queued;
       queued = [];
       q.forEach(function (f) { f(); });
+      subs.connection.forEach(function (h) { h({ connected: true }); });
     };
     ws.onmessage = onFrame;
     ws.onclose = function () {
       ready = false;
       pending.forEach(function (p) { p.reject(new Error('disconnected')); });
       pending.clear();
+      queued = [];
+      subs.connection.forEach(function (h) { h({ connected: false }); });
       scheduleReconnect();
     };
     ws.onerror = function () {};
@@ -84,6 +97,8 @@
         subs.layout.forEach(function (h) { h(f.payload); });
       } else if (f.type === 'clients') {
         subs.clients.forEach(function (h) { h(f.payload); });
+      } else if (f.type === 'terminal-resync-required') {
+        subs.resync.forEach(function (h) { h(f.payload); });
       }
     }
   }
@@ -94,12 +109,13 @@
     var op = dv.getUint8(0);
     var paneIdLen = dv.getUint16(1, false); // big-endian
     var off = 3;
-    var paneId = new TextDecoder().decode(new Uint8Array(buf, off, paneIdLen));
+    var paneId = textDecoder.decode(new Uint8Array(buf, off, paneIdLen));
     off += paneIdLen;
-    var data = new TextDecoder().decode(new Uint8Array(buf, off));
+    var byteLength = buf.byteLength - off;
+    var data = textDecoder.decode(new Uint8Array(buf, off));
     // BIN_WRITE (0x77) and BIN_SCROLLBACK (0x73) both feed onTerminalData.
     void op;
-    subs.data.forEach(function (h) { h({ paneId: paneId, data: data }); });
+    subs.data.forEach(function (h) { h({ paneId: paneId, data: data, byteLength: byteLength }); });
   }
 
   function sendRequest(op, payload) {
@@ -189,6 +205,8 @@
     defaultCwd: BOOT.defaultCwd,
     defaultTabTitle: BOOT.defaultTabTitle,
     createTerminal: function (p) { return sendRequest('terminal-create', p); },
+    subscribeTerminal: function (p) { return sendRequest('terminal-subscribe', p); },
+    unsubscribeTerminal: function (p) { return sendRequest('terminal-unsubscribe', p); },
     writeTerminal: function (p) { return sendWriteBinary(p.paneId, p.data); },
     resizeTerminal: function (p) { return sendResizeRequest(p); },
     destroyTerminal: function (p) { return sendRequest('terminal-destroy', p); },
@@ -216,6 +234,8 @@
     onMenuAction: function (h) { subs.menu.add(h); return function () { subs.menu.delete(h); }; },
     onLayout: function (h) { subs.layout.add(h); return function () { subs.layout.delete(h); }; },
     onClients: function (h) { subs.clients.add(h); return function () { subs.clients.delete(h); }; },
+    onTerminalResyncRequired: function (h) { subs.resync.add(h); return function () { subs.resync.delete(h); }; },
+    onConnectionChange: function (h) { subs.connection.add(h); return function () { subs.connection.delete(h); }; },
   };
 
   connect();

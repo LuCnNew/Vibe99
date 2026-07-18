@@ -17,8 +17,9 @@ Vibe99 Web Access 把 Vibe99 的多 pane 终端工作区放到浏览器里，并
 - 在浏览器里使用 Vibe99 的多 pane 终端 UI。
 - 只要 `web-access` 服务还在运行，pty 会话就继续活着。
 - 关闭浏览器、刷新页面、网络断开或换设备后，可以重新接上同一组 pane。
-- 重新连接时会回放该 pane 的 scrollback，不是空白屏幕。
-- 多个浏览器客户端可以同时连接；输出会广播给所有客户端。
+- 聚焦或重新连接时会按 byte sequence 增量补齐该 pane 的历史输出，不是空白屏幕。
+- 多个浏览器客户端可以同时连接；页面可见时每个 pane 都持续接收实时输出。
+- 服务进程重启会丢失原 PTY 和其中任务，但已打开页面会自动重建 pane、清除旧画面并重新订阅。
 - 输入策略是自由写入：任一已连接客户端都可以向任一 pane 输入。
 
 ## 前置条件
@@ -164,7 +165,7 @@ sudo ufw allow in on tun0 from 10.8.0.0/24 to any port 7777 proto tcp
 ```
 
 5. 远程浏览器会从服务端拿到当前 pane 布局。
-6. 已有输出会从 scrollback 回放出来。
+6. 所有 pane 的已有输出会增量补齐并持续更新；只有浏览器标签页进入后台时才暂停。
 7. 新输出会同时显示在本机浏览器和远程浏览器。
 8. 你可以在远程浏览器里继续输入，接着操作同一个任务。
 
@@ -179,7 +180,10 @@ sudo ufw allow in on tun0 from 10.8.0.0/24 to any port 7777 proto tcp
 - **这是多个用户吗？** 不是。当前是“单用户、多客户端”模型：一个受信任用户，可以从多台设备接入同一工作区。
 - **远程能看到本地输入吗？** 能看到终端输出流。通常 shell 会回显你本地输入的字符，所以远程也会看到你打出来的命令和后续输出。
 - **本地和远程看到的是同一个 pane 吗？** 是。所有客户端连接的是服务端持有的同一组 pane 和 pty。
-- **新连接会看到历史内容吗？** 会。服务端会把该 pane 的 scrollback 回放给新连接的客户端。
+- **新连接会看到历史内容吗？** 会。页面可见时客户端订阅全部 pane，并按 byte sequence
+  增量补齐；浏览器标签页进入后台后暂停，重新可见时再追赶。
+- **服务重启后必须刷新网页吗？** 不必。页面会自动重连并重建缺失 pane；但原 PTY 里的任务和
+  历史已经随服务进程退出，无法恢复。
 - **两个客户端同时打字会怎样？** 当前是自由写入，两个键盘的字节都会进入同一个 pty，可能交错成错误命令。实际使用时，同一时间只在一个设备上输入。
 - **`name=desk/travel` 是身份吗？** 不是。`name` 只是状态栏显示名，用来区分客户端；真正的访问凭据是 `token`。
 
@@ -236,7 +240,8 @@ npm run smoke:multi
 
 - `smoke-session.js` 通过：说明 pty 创建、输出捕获、reattach 和 scrollback 回放可用。
 - `smoke-ws.js` 通过：说明错误 token 会被拒绝，正确 token 能完成 create/write/read。
-- `smoke-ws-multi.js` 通过：说明两个客户端能共享 layout、clients 列表、scrollback 和新增 pane。
+- `smoke-ws-multi.js` 通过：说明两个客户端能共享 layout/clients，只向订阅者发送输出，
+  暂停后可增量追赶，并同步新增 pane。
 
 ## 背后原理
 
@@ -251,14 +256,14 @@ Browser
 RealtimeGateway
   校验 token
   维护已连接客户端列表
-  广播终端输出、layout 和客户端状态
-  按所有已连接客户端中的最小尺寸调整 pty
+  广播 layout 和客户端状态，只向 pane 订阅者发送终端输出
+  按订阅该 pane 的客户端最小尺寸调整 pty
 
 SessionManager
   持有 node-pty 进程
   浏览器断开后继续保留 pty
-  为每个 pane 保存有限 scrollback
-  只向重新连接的客户端回放 scrollback
+  用有界 chunk deque 保存带 byte sequence 的输出历史
+  为重新聚焦的客户端增量补齐缺失输出
 ```
 
 浏览器侧的 `web/vibe99-shim.js` 暴露和 Electron preload 同形状的 `window.vibe99` API。这样
@@ -290,7 +295,8 @@ SessionManager
   `TcpTestSucceeded : False`，通常是主机防火墙没有放行端口；可先执行
   `sudo ufw allow 7777/tcp` 验证。
 - **端口占用**：修改 `config.json` 里的 `port`，或停掉旧服务。
-- **远程画面被小窗口约束**：这是预期行为；多客户端连接时，pty 使用所有客户端中的最小尺寸。
+- **远程画面被小窗口约束**：这是预期行为；同一 pane 有多个实时订阅者时，pty 使用这些
+  订阅客户端中的最小尺寸。后台未订阅窗口不参与。
 - **网页粘贴无效**：先刷新页面，必要时强制刷新；网页端优先使用浏览器原生 `paste` 事件，`Ctrl+V`
   通常最稳，`Ctrl+Shift+V` 是否触发粘贴取决于浏览器和系统快捷键。
 

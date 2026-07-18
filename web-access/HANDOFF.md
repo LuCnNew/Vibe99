@@ -59,7 +59,8 @@ npm run start:web              # 启动服务
 - **身份模型**：`name=` 只是客户端显示名，不是安全身份；`token` 才是访问凭据。当前是单用户、多客户端模型。
 - **持久化**：关浏览器/断网再重连，同一组 pane 与正在跑的任务仍在，历史输出（scrollback）可见；服务进程退出则会话丢失。
 - **加 pane**：点 `+` 或 `Ctrl/Cmd+T`；服务进程内刷新/重连后，所有 pane（含手动加的 p4+）都会回来。
-- **尺寸**：多客户端时终端取**最小尺寸**（tmux 式）——谁都不会被截断；大屏会有右侧留白（正常，不错位）。
+- **尺寸**：同一 pane 有多个实时订阅者时取**订阅者最小尺寸**（tmux 式）；后台未订阅窗口
+  不参与。大屏可能有右侧留白（正常，不错位）。
 - **右键菜单 / 复制粘贴**：浏览器内右键菜单（文本）；非 HTTPS 网络下 `navigator.clipboard` 可能受限，用右键粘贴兜底。
 
 ---
@@ -104,7 +105,9 @@ journalctl --user -u vibe99-web -f       # 看日志
 export WS_TOKEN="$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.env.HOME+'/.config/vibe99-web/config.json','utf8')).token)")"
 npm run smoke:session            # 持久化核心：create→输出→再 create REATTACH 回放
 npm run smoke:ws                 # 单客户端：错 token 拒绝 + create/write 往返
-npm run smoke:multi              # 多客户端：layout/clients 广播 + scrollback 单播 + p4 同步
+npm run smoke:multi              # 多客户端：订阅/增量追赶 + layout/clients + p4 同步
+npm run smoke:history            # chunk ring、sequence、UTF-8 边界和容量重开
+npm run smoke:gateway            # 输出/exit 顺序、慢客户端上限和旧协议兼容
 ```
 
 三个都 `PASS` 即服务端正常。浏览器侧行为（渲染、状态栏、尺寸、多标签同步）需在真实浏览器确认。
@@ -116,18 +119,27 @@ npm run smoke:multi              # 多客户端：layout/clients 广播 + scroll
 ```
 浏览器 (127.0.0.1 / <HOST_IP>)
    │  HTTP GET /            → web/index.html（网关注入 boot：platform/cwd/panes）
-   │  HTTP GET /src/**, /node_modules/@xterm/**, /web/**  → 只读复用 Vibe99 资源
+   │  HTTP GET /src/**, 必需的 /node_modules/@xterm/**, /web/vibe99-shim.js
+   │                                                    → 只读复用 Vibe99 资源
    │  WS  /ws?token=&name=  → RealtimeGateway（sirv + ws，同端口；边缘鉴权）
    ▼
-RealtimeGateway —— 多客户端集合、广播输出/layout/clients、心跳、最小尺寸协调
+RealtimeGateway —— 多客户端集合、按订阅分发输出、广播 layout/clients、心跳、最小尺寸协调
    ▼
-SessionManager —— 持久 pty 会话（与客户端解耦）；createTerminal 幂等（reattach 回放 scrollback，单播）
+SessionManager —— 持久 pty 会话（与客户端解耦）；createTerminal 幂等，历史按 sequence 增量读取
 ```
 
 关键设计：
 - **会话持久**：pty 归 SessionManager 拥有，客户端断开不杀；仅服务端进程退出才全灭（ADR-002）。
+- **自动重连**：传输短暂中断时按 sequence 续传；服务重启导致 PTY 丢失时，已打开页面会
+  幂等重建 pane、清除旧画面并重新订阅，但不能恢复原任务。
 - **布局真相源**：服务端持有 pane 列表，客户端连接/刷新时从 boot 注入 + `layout` 事件对账（`src/renderer.js` 的 `reconcileLayout`），p4+ 因此可在服务进程内接续。
 - **传输**：控制流文本 JSON（req/res/event，`messageId` 关联 Promise），终端数据二进制帧（`protocol.js`）。
+- **全部实时**：页面可见时 Web 客户端订阅全部 pane；断线或页面从后台恢复时按 byte sequence
+  增量追赶。
+- **渲染降载**：全部 pane 持续更新，但只有焦点 pane 使用 WebGL renderer 和光标动画；
+  页面进入后台时暂停全部实时流。
+- **追赶边界**：历史是有上限的原始 PTY 字节流；落后超过窗口时从最早可用字节重置。若要对任意
+  全屏 TUI 精确恢复，需要服务端终端状态模型和快照。
 - **垫片**：`web/vibe99-shim.js` 实现与 Electron `window.vibe99` 同形状的接口，底层走 WebSocket；经典脚本先于 renderer 模块加载。
 
 ---
@@ -158,7 +170,7 @@ server/
   config.js           配置加载/校验
   auth.js             bearer 令牌校验（timingSafeEqual）
   gateway.js          HTTP(sirv)+WS、多客户端、广播、心跳、最小尺寸、boot 注入
-  session-manager.js  持久 pty 会话、幂等 createTerminal、scrollback、广播
+  session-manager.js  持久 pty 会话、幂等 createTerminal、chunk ring、sequence、输出合并
   pty-loader.js       从 Vibe99 的 node_modules 加载 node-pty
   settings-store.js   设置持久（移植自 Vibe99 config.ts）
   protocol.js         报文/二进制帧编解码、op/event 常量
@@ -188,7 +200,7 @@ ADR/ specs/ URD.md HLD.md README.md BACKLOG.md ISSUES.md VERIFICATION_PLAN.md re
 | OpenVPN 能 ping 但网页打不开 | 在 Windows 上用 `Test-NetConnection <HOST_IP> -Port 7777`；若 `PingSucceeded=True` 但 `TcpTestSucceeded=False`，通常是主机防火墙没放行 `7777/tcp` |
 | `EADDRINUSE` | 端口被占（改 `port` 或停旧实例） |
 | pane 闪退/消失 | 确认跑的是最新代码（renderer 的 `pendingLocalAdds` 修复） |
-| 尺寸错位 | 多客户端取最小尺寸，大屏留白属正常；若全屏 TUI 错乱，确认所有客户端都上报了尺寸（聚焦该 pane 触发 refit） |
+| 尺寸错位 | 同一 pane 的订阅客户端取最小尺寸，大屏留白属正常；若全屏 TUI 错乱，让相关客户端聚焦该 pane 触发 refit |
 
 ---
 

@@ -21,9 +21,9 @@ URD 保证"会话存续"——终端任务在本机持续运行，与客户端�
 ## Behavioral Contract
 
 - 会话在宿主进程运行期间持续存活并产出输出，与附着客户端数无关（0 个也活）。
-- 客户端（重新）附着时，收到该会话已保留的 scrollback。
+- 客户端（重新）附着时，可按 byte sequence 获取仍保留的增量输出；落后超过保留窗口时重置。
 - 关闭最后一个客户端**不会**杀死会话。
-- 仅显式 destroy（用户动作）才杀掉 pty 并移除会话。
+- 显式 destroy 会杀掉 pty 并移除会话；pty 自然退出后发送最终输出/exit 并释放会话容量。
 - resize 生效（强制最小 cols/rows 下限）。
 
 ## Structural Contract
@@ -39,4 +39,6 @@ URD 保证"会话存续"——终端任务在本机持续运行，与客户端�
 
 > 改造自现有 `electron/main.js` 的 `terminalSessions` 与 `pty.onData/onExit`；复用 `electron/pty.js`（node-pty 加载器）。
 
-> **Phase 2 更新（多客户端）**：作为**布局真相源**——create/destroy 触发 `layout` 广播给全部客户端；支持向指定客户端发送某 pane 的 scrollback（连接即回放全部 pane）；`resize` 接受外部计算的最小尺寸（ADR-005，由 Gateway 算 min 后调用）。
+> **Phase 3 更新（增量历史）**：scrollback 使用有界 chunk deque，避免每个 PTY 小块都复制完整
+> Buffer；输出按短时间窗/大小合并。`getOutputSince(paneId, afterSeq)` 返回增量 chunk，超出保留
+> 窗口时标记 reset。create/destroy 才改变布局，reattach 不广播 layout。

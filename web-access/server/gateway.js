@@ -8,6 +8,8 @@ import {
   OPS,
   EVENTS,
   BIN_WRITE,
+  BIN_SCROLLBACK,
+  encodeBinary,
   encodeResponseOk,
   encodeResponseErr,
   encodeEvent,
@@ -24,6 +26,10 @@ const SHIM_PATH = path.join(WEB_DIR, 'vibe99-shim.js');
 const UNAUTH_CODE = 4401;
 const jsMime = 'text/javascript; charset=utf-8';
 const HEARTBEAT_MS = 30000;
+const BULK_CHUNK_BYTES = 64 * 1024;
+const BULK_BUFFER_HIGH_WATER = 256 * 1024;
+const BULK_RETRY_MS = 10;
+const BULK_QUEUE_MAX_BYTES = 4 * 1024 * 1024;
 
 function setNoStoreHeaders(res) {
   res.setHeader('Cache-Control', 'no-store');
@@ -35,8 +41,16 @@ function setLongCacheHeaders(res) {
   res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 }
 
-function isNodeModulePath(pathname) {
-  return pathname.replace(/\\/g, '/').startsWith('/node_modules/');
+const PUBLIC_NODE_MODULE_PREFIXES = [
+  '/node_modules/@xterm/xterm/',
+  '/node_modules/@xterm/addon-fit/',
+  '/node_modules/@xterm/addon-web-links/',
+  '/node_modules/@xterm/addon-webgl/',
+];
+
+function isPublicNodeModulePath(pathname) {
+  const normalized = pathname.replace(/\\/g, '/');
+  return PUBLIC_NODE_MODULE_PREFIXES.some((prefix) => normalized.startsWith(prefix));
 }
 
 function contentTypeForPath(filePath) {
@@ -70,14 +84,14 @@ export class RealtimeGateway {
     this._sessions = sessions;
     this._settings = settings;
     this._concurrency = concurrency;
-    this._clients = new Map(); // id -> { ws, id, name, addr, connectedAt, sizes:Map, pongPending }
+    this._clients = new Map(); // id -> client state, including a FIFO bulk-data queue
     this._nextClientId = 1;
     this._server = null;
     this._wss = null;
     this._heartbeat = null;
     this._paneMinSizes = new Map();
     // SessionManager broadcasts live output / exit to all clients.
-    this._sessions.setBroadcastSink((frame) => this._broadcast(frame));
+    this._sessions.setBroadcastSink((frame, meta) => this._broadcast(frame, meta));
   }
 
   listen() {
@@ -96,8 +110,10 @@ export class RealtimeGateway {
       const pathname = (req.url || '/').split('?')[0];
       if (pathname === '/' || pathname === '/index.html') return this._serveIndex(res);
       if (pathname === '/web/vibe99-shim.js') return this._serveFile(res, SHIM_PATH, jsMime);
-      if (isNodeModulePath(pathname)) return serveStatic(req, res);
-      return this._serveProjectStatic(res, pathname);
+      if (isPublicNodeModulePath(pathname)) return serveStatic(req, res);
+      if (pathname.startsWith('/src/')) return this._serveProjectStatic(res, pathname);
+      res.statusCode = 404;
+      res.end('not found');
     };
 
     this._server = http.createServer(handler);
@@ -163,14 +179,21 @@ export class RealtimeGateway {
       return;
     }
     try {
-      const stats = fs.statSync(filePath);
+      const realRoot = fs.realpathSync(this._config.staticRoot);
+      const realFile = fs.realpathSync(filePath);
+      if (realFile !== realRoot && !realFile.startsWith(realRoot + path.sep)) {
+        res.statusCode = 404;
+        res.end('not found');
+        return;
+      }
+      const stats = fs.statSync(realFile);
       if (!stats.isFile()) {
         res.statusCode = 404;
         res.end('not found');
         return;
       }
-      const data = fs.readFileSync(filePath);
-      res.setHeader('Content-Type', contentTypeForPath(filePath));
+      const data = fs.readFileSync(realFile);
+      res.setHeader('Content-Type', contentTypeForPath(realFile));
       res.setHeader('Content-Length', data.byteLength);
       res.setHeader('Last-Modified', stats.mtime.toUTCString());
       setNoStoreHeaders(res);
@@ -200,6 +223,12 @@ export class RealtimeGateway {
     return null;
   }
 
+  _extractProtocolVersion(req) {
+    const q = (req.url || '').split('?')[1];
+    if (!q) return 1;
+    return Number(new URLSearchParams(q).get('protocol')) === 2 ? 2 : 1;
+  }
+
   // --- connection lifecycle ---
   _handleConnection(ws, req) {
     const remote = req.socket.remoteAddress;
@@ -212,7 +241,21 @@ export class RealtimeGateway {
 
     const id = `c${this._nextClientId++}`;
     const name = this._extractName(req) || id;
-    const client = { ws, id, name, addr: remote, connectedAt: Date.now(), sizes: new Map(), pongPending: false };
+    const client = {
+      ws,
+      id,
+      name,
+      addr: remote,
+      connectedAt: Date.now(),
+      sizes: new Map(),
+      pongPending: false,
+      protocolVersion: this._extractProtocolVersion(req),
+      subscriptions: new Map(),
+      bulkQueue: [],
+      bulkBytes: 0,
+      bulkScheduled: false,
+      bulkTimer: null,
+    };
     this._clients.set(id, client);
     logger.info(`client connected id=${id} name=${name} remote=${remote} (total=${this._clients.size})`);
 
@@ -231,9 +274,14 @@ export class RealtimeGateway {
   }
 
   _handleDisconnect(client) {
+    const affectedPaneIds = [...client.sizes.keys()];
     this._clients.delete(client.id);
+    if (client.bulkTimer) clearTimeout(client.bulkTimer);
+    client.bulkTimer = null;
+    client.bulkQueue.length = 0;
+    client.bulkBytes = 0;
     logger.info(`client disconnected id=${client.id} (total=${this._clients.size}) (sessions kept alive)`);
-    this._recomputeMinAll(); // this client's sizes leave the min pool
+    this._recomputeMinAll(affectedPaneIds); // this client's sizes leave the min pool
     this._broadcastClients();
   }
 
@@ -243,8 +291,137 @@ export class RealtimeGateway {
     else client.ws.send(frame, { binary: true });
   }
 
-  _broadcast(frame) {
-    for (const c of this._clients.values()) this._sendTo(c, frame);
+  _broadcast(frame, meta = null) {
+    for (const c of this._clients.values()) {
+      if (Buffer.isBuffer(frame)) {
+        const paneId = meta?.paneId;
+        if (c.protocolVersion < 2 || (paneId && c.subscriptions.has(paneId))) {
+          this._enqueueBulk(c, frame, paneId, c.subscriptions.get(paneId) ?? null);
+        }
+      } else if (
+        meta?.ordered &&
+        (c.protocolVersion < 2 || c.subscriptions.has(meta.paneId))
+      ) {
+        this._enqueueBulk(
+          c,
+          frame,
+          meta.paneId,
+          null,
+          false,
+          true,
+        );
+      }
+      else this._sendTo(c, frame);
+    }
+  }
+
+  _enqueueBulk(
+    client,
+    frame,
+    paneId = null,
+    generation = null,
+    binary = true,
+    protectedEntry = false,
+  ) {
+    if (client.ws.readyState !== 1) return;
+    const frameBytes = Buffer.isBuffer(frame) ? frame.length : Buffer.byteLength(frame);
+    if (client.bulkBytes + frameBytes > BULK_QUEUE_MAX_BYTES) {
+      if (protectedEntry) {
+        this._dropBulkPane(client, paneId);
+        if (client.bulkBytes + frameBytes > BULK_QUEUE_MAX_BYTES) {
+          this._sendTo(client, frame);
+          return;
+        }
+      } else if (paneId && client.protocolVersion >= 2) {
+        this._dropBulkPane(client, paneId);
+        client.subscriptions.delete(paneId);
+        client.sizes.delete(paneId);
+        this._recomputeMin(paneId);
+        this._sendTo(client, encodeEvent(EVENTS.TERMINAL_RESYNC_REQUIRED, { paneId }));
+      } else {
+        try { client.ws.close(4410, 'slow consumer'); } catch {}
+      }
+      if (!protectedEntry) return;
+    }
+    client.bulkQueue.push({ frame, frameBytes, paneId, generation, binary, protectedEntry });
+    client.bulkBytes += frameBytes;
+    this._scheduleBulkDrain(client);
+  }
+
+  _dropBulkPane(client, paneId) {
+    const kept = [];
+    let bytes = 0;
+    for (const entry of client.bulkQueue) {
+      if (entry.paneId === paneId && !entry.protectedEntry) continue;
+      kept.push(entry);
+      bytes += entry.frameBytes;
+    }
+    client.bulkQueue = kept;
+    client.bulkBytes = bytes;
+  }
+
+  _scheduleBulkDrain(client, delay = 0) {
+    if (client.bulkScheduled || client.ws.readyState !== 1) return;
+    client.bulkScheduled = true;
+    const run = () => {
+      client.bulkScheduled = false;
+      client.bulkTimer = null;
+      this._drainBulk(client);
+    };
+    if (delay > 0) client.bulkTimer = setTimeout(run, delay);
+    else setImmediate(run);
+  }
+
+  _drainBulk(client) {
+    if (client.ws.readyState !== 1) {
+      client.bulkQueue.length = 0;
+      client.bulkBytes = 0;
+      return;
+    }
+    if (!client.bulkQueue.length) return;
+    if (client.ws.bufferedAmount > BULK_BUFFER_HIGH_WATER) {
+      this._scheduleBulkDrain(client, BULK_RETRY_MS);
+      return;
+    }
+    const entry = client.bulkQueue.shift();
+    client.bulkBytes -= entry.frameBytes;
+    if (
+      entry.paneId &&
+      client.protocolVersion >= 2 &&
+      !entry.protectedEntry &&
+      client.subscriptions.get(entry.paneId) !== entry.generation
+    ) {
+      this._scheduleBulkDrain(client);
+      return;
+    }
+    if (entry.binary) client.ws.send(entry.frame, { binary: true });
+    else client.ws.send(entry.frame);
+    // Yield after every chunk so newly arrived control requests can jump ahead
+    // of queued terminal history while binary terminal data remains FIFO.
+    this._scheduleBulkDrain(client);
+  }
+
+  _enqueueHistory(client, paneId, chunks, generation = null) {
+    for (const historyChunk of chunks) {
+      const data = historyChunk.data;
+      let start = 0;
+      while (start < data.length) {
+        let end = Math.min(start + BULK_CHUNK_BYTES, data.length);
+        // Browser frames are decoded independently, so don't split UTF-8 code
+        // points across chunks.
+        if (end < data.length) {
+          while (end > start && (data[end] & 0xc0) === 0x80) end -= 1;
+        }
+        if (end === start) end = Math.min(start + BULK_CHUNK_BYTES, data.length);
+        this._enqueueBulk(
+          client,
+          encodeBinary(BIN_SCROLLBACK, paneId, data.subarray(start, end)),
+          paneId,
+          generation,
+        );
+        start = end;
+      }
+    }
   }
 
   _broadcastClients() {
@@ -276,11 +453,38 @@ export class RealtimeGateway {
     try {
       switch (op) {
         case OPS.TERMINAL_CREATE: {
-          // reattach scrollback is UNICAST to this client (not broadcast).
-          const r = this._sessions.createTerminal(payload, (f) => this._sendTo(client, f));
-          reply(encodeResponseOk(id, r));
-          this._recordSize(client, payload.paneId, payload.cols, payload.rows); // feed min-size from create-time dims
-          this._broadcastLayout();
+          const result = this._sessions.createTerminal(payload);
+          reply(encodeResponseOk(id, result));
+          if (client.protocolVersion < 2) {
+            const snapshot = this._sessions.getOutputSince(payload.paneId, 0);
+            this._enqueueHistory(client, payload.paneId, snapshot.chunks);
+            this._recordSize(client, payload.paneId, payload.cols, payload.rows);
+          }
+          if (!result.reattached) this._broadcastLayout();
+          break;
+        }
+        case OPS.TERMINAL_SUBSCRIBE: {
+          const paneId = payload.paneId;
+          const snapshot = this._sessions.getOutputSince(paneId, payload.afterSeq);
+          const generation = (client.subscriptions.get(paneId) || 0) + 1;
+          client.subscriptions.set(paneId, generation);
+          this._recordSize(client, paneId, payload.cols, payload.rows);
+          reply(encodeResponseOk(id, {
+            paneId,
+            reset: snapshot.reset,
+            fromSeq: snapshot.fromSeq,
+            toSeq: snapshot.toSeq,
+          }));
+          this._enqueueHistory(client, paneId, snapshot.chunks, generation);
+          break;
+        }
+        case OPS.TERMINAL_UNSUBSCRIBE: {
+          const paneId = payload.paneId;
+          client.subscriptions.delete(paneId);
+          this._dropBulkPane(client, paneId);
+          client.sizes.delete(paneId);
+          this._recomputeMin(paneId);
+          reply(encodeResponseOk(id, {}));
           break;
         }
         case OPS.TERMINAL_RESIZE: {
@@ -296,6 +500,12 @@ export class RealtimeGateway {
         }
         case OPS.TERMINAL_DESTROY:
           this._sessions.destroy(payload.paneId);
+          for (const c of this._clients.values()) {
+            c.subscriptions.delete(payload.paneId);
+            this._dropBulkPane(c, payload.paneId);
+            c.sizes.delete(payload.paneId);
+          }
+          this._paneMinSizes.delete(payload.paneId);
           reply(encodeResponseOk(id, {}));
           this._broadcastLayout();
           break;
@@ -367,8 +577,8 @@ export class RealtimeGateway {
     return parts.join(',');
   }
 
-  _recomputeMinAll() {
-    const paneIds = new Set();
+  _recomputeMinAll(extraPaneIds = []) {
+    const paneIds = new Set(extraPaneIds);
     for (const c of this._clients.values()) for (const pid of c.sizes.keys()) paneIds.add(pid);
     for (const pid of paneIds) this._recomputeMin(pid);
   }

@@ -1,6 +1,7 @@
 # ADR-005 — Multi-Client Viewport Size (Min-Attached)
 
-> **BLUF**：多客户端时，pty 尺寸 = 所有已连接客户端 cols×rows 的**最小值**（tmux 默认行为），在 connect/disconnect/客户端 resize 时重算。
+> **BLUF**：同一 pane 有多个实时订阅客户端时，pty 尺寸 = 这些订阅者 cols×rows 的
+> **最小值**（tmux 默认行为）；后台未订阅客户端不参与。
 
 ## Context
 
@@ -8,16 +9,18 @@
 
 ## Options Considered
 
-- **最小尺寸**（tmux 式）：pty = min(所有已连接客户端 cols×rows)
+- **订阅者最小尺寸**（tmux 式）：pty = min(订阅该 pane 的客户端 cols×rows)
 - **最后 resize 胜出**：谁最后调 resize 用谁的
 - **每客户端虚拟尺寸**：各自重排输出（过于复杂，否决）
 
 ## Decision
 
-**最小尺寸**：pty cols×rows = min over 所有已连接客户端；在客户端 connect/disconnect/resize 时重算并 resize pty。
+**订阅者最小尺寸**：pty cols×rows = min over 订阅该 pane 的客户端；在
+subscribe/unsubscribe/disconnect/resize 时重算并 resize pty。
 
 ## Consequences
 
-- **优点**：无客户端被截断；行为可预期；重绘只在最小值变化（客户端连入/断开）时发生，远少于"最后 resize 胜出"的频繁闪烁。
-- **代价**：大屏被限制到最小客户端（如笔记本）尺寸。
-- **实现归属**：由 Gateway（知晓全部客户端尺寸）计算 min，调用 SessionManager.resize。
+- **优点**：实时观看该 pane 的客户端不会被截断；后台窗口不会持续压小 PTY；重绘只在订阅者
+  集合或其最小值变化时发生。
+- **代价**：多个订阅者中，大屏仍会被限制到最小客户端（如笔记本）尺寸。
+- **实现归属**：由 Gateway（知晓各 pane 订阅者尺寸）计算 min，调用 SessionManager.resize。

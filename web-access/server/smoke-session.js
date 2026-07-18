@@ -3,7 +3,7 @@
 // create-again REATTACHES (reattached:true) and replays scrollback.
 import { SessionManager } from './session-manager.js';
 import { loadPty } from './pty-loader.js';
-import { decodeBinary, BIN_WRITE, BIN_SCROLLBACK } from './protocol.js';
+import { decodeBinary, encodeBinary, BIN_WRITE, BIN_SCROLLBACK } from './protocol.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -41,7 +41,12 @@ const MARKER = 'vibe99-web-persistence-test';
   console.log(`   terminal-data frames: ${dataFrames.length} | marker seen: ${sawMarker}`);
 
   binaryFrames.length = 0;
-  console.log('2) create p1 again →', sessions.createTerminal({ paneId: 'p1', cols: 80, rows: 24 }));
+  const reattach = sessions.createTerminal({ paneId: 'p1', cols: 80, rows: 24 });
+  console.log('2) create p1 again →', { paneId: reattach.paneId, reattached: reattach.reattached });
+  const snapshot = sessions.getOutputSince(reattach.paneId, 0);
+  for (const chunk of snapshot.chunks) {
+    binaryFrames.push(encodeBinary(BIN_SCROLLBACK, reattach.paneId, chunk.data));
+  }
   await sleep(150);
   const replay = binaryFrames.map(decodeBinary).filter((f) => f.op === BIN_SCROLLBACK);
   const replayHasMarker = replay.some((f) => f.data.includes(MARKER));

@@ -193,12 +193,12 @@ Browser
 Web Access Gateway
   校验 token
   维护在线客户端列表
-  广播终端输出、pane layout 和 client 状态
+  向 pane 订阅者分发终端输出，广播 layout 和 client 状态
 
 SessionManager
   持有 node-pty 进程
   浏览器断开后继续保留 pty
-  新客户端连接时回放 scrollback
+  页面可见时为全部 pane 实时分发，断线后按 byte sequence 增量补发 bounded history
 ```
 
 更详细的设计、限制和排障见 [web-access/README.md](web-access/README.md)。
@@ -209,6 +209,9 @@ SessionManager
 - 当前是单用户、多客户端模型，没有多账号隔离。
 - 服务进程退出或主机重启后，当前 pty 会话会丢失。
 - HTTP 非安全上下文下，浏览器剪贴板能力可能受限制；右键粘贴通常可作为兜底。
+- 历史是有上限的原始 PTY 字节流。客户端落后超过保留窗口时会从最早可用字节重置；
+  若全屏 TUI 的 ANSI 状态变化发生在窗口之前，画面不保证能完全重建。精确恢复需要后续引入
+  服务端终端状态模型和快照。
 
 ## Desktop App
 

@@ -1,6 +1,7 @@
 import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import { WebLinksAddon } from '../node_modules/@xterm/addon-web-links/lib/addon-web-links.mjs';
+import { WebglAddon } from '../node_modules/@xterm/addon-webgl/lib/addon-webgl.mjs';
 
 function createUnavailableBridge() {
   const fail = () => {
@@ -12,6 +13,8 @@ function createUnavailableBridge() {
     defaultCwd: '.',
     defaultTabTitle: '.',
     createTerminal: fail,
+    subscribeTerminal: () => Promise.resolve({ reset: false, fromSeq: 0, toSeq: 0 }),
+    unsubscribeTerminal: () => Promise.resolve({}),
     writeTerminal: fail,
     resizeTerminal: fail,
     destroyTerminal: fail,
@@ -26,10 +29,14 @@ function createUnavailableBridge() {
     onTerminalData: () => () => {},
     onTerminalExit: () => () => {},
     onMenuAction: () => () => {},
+    onTerminalResyncRequired: () => () => {},
+    onConnectionChange: () => () => {},
   };
 }
 
 const bridge = window.vibe99 ?? createUnavailableBridge();
+const isWebTransport = Boolean(window.__VIBE99_BOOT__);
+const utf8Encoder = new TextEncoder();
 
 const accentPalette = [
   '#ff6b57',
@@ -119,11 +126,18 @@ const settings = {
 };
 let pendingSettingsSave = null;
 let windowResizeTimer = null;
+let pendingLayoutPayload = null;
+let pendingLayoutFrame = null;
 
-const removeTerminalDataListener = bridge.onTerminalData(({ paneId, data }) => {
+const removeTerminalDataListener = bridge.onTerminalData(({ paneId, data, byteLength }) => {
   const node = paneNodeMap.get(paneId);
   if (node) {
-    node.terminal.write(data);
+    writeTerminalData(node, {
+      data,
+      byteLength: Number.isFinite(byteLength)
+        ? byteLength
+        : utf8Encoder.encode(data).byteLength,
+    });
   }
 });
 
@@ -143,7 +157,21 @@ const removeTerminalExitListener = bridge.onTerminalExit(({ paneId, exitCode }) 
   }
 
   if (panes.length === 1) {
-    void bridge.closeWindow().catch(reportError);
+    if (isWebTransport) {
+      unsubscribePane(node);
+      disableWebgl(node);
+      if (node.resizeTimer !== null) window.clearTimeout(node.resizeTimer);
+      node.sessionReady = false;
+      disposeTerminalNode(node);
+      node.terminal.dispose();
+      node.root.remove();
+      paneNodeMap.delete(paneId);
+      panes = [];
+      focusedPaneId = null;
+      render(false);
+    } else {
+      void bridge.closeWindow().catch(reportError);
+    }
     return;
   }
 
@@ -179,7 +207,9 @@ function reconcileLayout(layout) {
   if (!panes.find((p) => p.id === focusedPaneId)) {
     focusedPaneId = panes[0]?.id ?? null;
   }
-  render(true);
+  // New nodes fit themselves; existing terminals do not need a full refit just
+  // because another client added or removed a pane.
+  render(false);
 }
 
 function renderClients() {
@@ -191,16 +221,50 @@ function renderClients() {
 }
 
 const removeLayoutListener = bridge.onLayout?.((layout) => {
-  try {
-    reconcileLayout(layout);
-  } catch (error) {
-    reportError(error);
-  }
+  pendingLayoutPayload = layout;
+  if (pendingLayoutFrame !== null) return;
+  pendingLayoutFrame = requestAnimationFrame(() => {
+    pendingLayoutFrame = null;
+    const nextLayout = pendingLayoutPayload;
+    pendingLayoutPayload = null;
+    try {
+      reconcileLayout(nextLayout);
+    } catch (error) {
+      reportError(error);
+    }
+  });
 });
 const removeClientsListener = bridge.onClients?.((payload) => {
   connectedClients.length = 0;
   if (payload && Array.isArray(payload.clients)) connectedClients.push(...payload.clients);
   renderClients();
+});
+const removeResyncListener = bridge.onTerminalResyncRequired?.(({ paneId }) => {
+  const node = paneNodeMap.get(paneId);
+  if (!node) return;
+  node.subscribed = false;
+  node.subscriptionToken += 1;
+  if (!document.hidden) {
+    subscribePane(node);
+  }
+});
+const removeConnectionListener = bridge.onConnectionChange?.(({ connected }) => {
+  if (!isWebTransport) return;
+  for (const node of paneNodeMap.values()) {
+    node.subscribed = false;
+    node.subscriptionToken += 1;
+    node.sessionReady = false;
+  }
+  if (connected) {
+    for (const node of paneNodeMap.values()) {
+      void initializePaneTerminal(node).then(() => {
+        // If the socket reopened while an older create request was still being
+        // rejected, the call above may have joined that stale initialization.
+        // Retry once after its lock clears.
+        if (!node.disposed && !node.sessionReady) void initializePaneTerminal(node);
+      });
+    }
+  }
 });
 
 function reportError(error) {
@@ -223,7 +287,7 @@ function getPreviewWidth(stageWidth, count) {
 }
 
 function getPaneLabel(pane) {
-  return pane.title ?? pane.terminalTitle ?? '';
+  return pane?.title ?? pane?.terminalTitle ?? '';
 }
 
 function applySettings() {
@@ -492,6 +556,18 @@ function createPane(pane) {
     accent: pane.accent,
     resizeTimer: null,
     pendingResize: null,
+    nextSeq: 0,
+    subscribed: false,
+    subscriptionToken: 0,
+    webglAddon: null,
+    webglDisabled: false,
+    pendingWrites: 0,
+    writeWaiters: [],
+    resetBuffer: null,
+    resetPromise: null,
+    hasAttachedSession: false,
+    initializingPromise: null,
+    disposed: false,
   };
 
   terminalHost.addEventListener('contextmenu', (event) => {
@@ -539,7 +615,11 @@ function fitTerminal(node, force = false) {
   const rows = Math.max(8, node.terminal.rows || 24);
   const nextSizeKey = `${cols}x${rows}`;
 
-  if (node.sessionReady && (force || nextSizeKey !== node.sizeKey)) {
+  if (
+    node.sessionReady &&
+    (!isWebTransport || node.subscribed) &&
+    (force || nextSizeKey !== node.sizeKey)
+  ) {
     scheduleTerminalResize(node, cols, rows);
   }
 
@@ -569,16 +649,184 @@ function scheduleTerminalResize(node, cols, rows) {
   }, TERMINAL_RESIZE_DEBOUNCE_MS);
 }
 
-async function initializePaneTerminal(node) {
-  fitTerminal(node, true);
-  await bridge.createTerminal({
-    paneId: node.paneId,
-    cols: node.terminal.cols,
-    rows: node.terminal.rows,
-    cwd: node.cwd,
+function enableWebgl(node) {
+  if (!isWebTransport || node.webglAddon || node.webglDisabled || document.hidden) return;
+  let addon = null;
+  try {
+    addon = new WebglAddon();
+    node.webglAddon = addon;
+    terminalLoadWebgl(node, addon);
+  } catch (error) {
+    node.webglAddon = null;
+    node.webglDisabled = true;
+    try { addon?.dispose(); } catch {}
+    console.warn('WebGL terminal renderer unavailable; using DOM renderer:', error);
+  }
+}
+
+function terminalLoadWebgl(node, addon) {
+  node.terminal.loadAddon(addon);
+  addon.onContextLoss(() => {
+    if (node.webglAddon !== addon) return;
+    node.webglAddon = null;
+    node.webglDisabled = true;
+    try { addon.dispose(); } catch {}
+    console.warn('WebGL context lost; terminal renderer fell back to DOM');
   });
-  node.sessionReady = true;
-  fitTerminal(node, true);
+}
+
+function disableWebgl(node) {
+  const addon = node.webglAddon;
+  if (!addon) return;
+  node.webglAddon = null;
+  try { addon.dispose(); } catch {}
+}
+
+function resolveWriteWaiters(node) {
+  if (node.pendingWrites > 0) return;
+  const waiters = node.writeWaiters;
+  node.writeWaiters = [];
+  for (const resolve of waiters) resolve();
+}
+
+function writeTerminalData(node, chunk) {
+  if (node.disposed) return;
+  if (node.resetBuffer !== null) {
+    node.resetBuffer.push(chunk);
+    return;
+  }
+  node.nextSeq += chunk.byteLength;
+  node.pendingWrites += 1;
+  node.terminal.write(chunk.data, () => {
+    if (node.disposed) return;
+    node.pendingWrites = Math.max(0, node.pendingWrites - 1);
+    resolveWriteWaiters(node);
+  });
+}
+
+function waitForTerminalWrites(node) {
+  if (node.disposed || node.pendingWrites === 0) return Promise.resolve();
+  return new Promise((resolve) => node.writeWaiters.push(resolve));
+}
+
+async function resetTerminalForSubscription(node, fromSeq) {
+  if (node.resetPromise) await node.resetPromise;
+  if (node.disposed) return;
+  const promise = (async () => {
+    node.resetBuffer = [];
+    await waitForTerminalWrites(node);
+    if (node.disposed) return;
+    node.terminal.reset();
+    node.nextSeq = fromSeq;
+    const buffered = node.resetBuffer;
+    node.resetBuffer = null;
+    for (const chunk of buffered) writeTerminalData(node, chunk);
+  })();
+  node.resetPromise = promise;
+  try {
+    await promise;
+  } finally {
+    if (node.resetPromise === promise) node.resetPromise = null;
+  }
+}
+
+function disposeTerminalNode(node) {
+  node.disposed = true;
+  node.resetBuffer = null;
+  node.pendingWrites = 0;
+  resolveWriteWaiters(node);
+}
+
+async function subscribePane(node) {
+  if (!isWebTransport || !node.sessionReady || node.subscribed || document.hidden) return;
+  node.subscribed = true;
+  const token = ++node.subscriptionToken;
+  const requestedAfterSeq = node.nextSeq;
+  try {
+    const result = await bridge.subscribeTerminal({
+      paneId: node.paneId,
+      afterSeq: node.nextSeq,
+      cols: node.terminal.cols,
+      rows: node.terminal.rows,
+    });
+    if (result.reset) {
+      await resetTerminalForSubscription(node, result.fromSeq);
+    } else if (node.nextSeq === requestedAfterSeq) {
+      node.nextSeq = result.fromSeq;
+    }
+    if (token !== node.subscriptionToken || !node.subscribed) return;
+  } catch (error) {
+    if (token !== node.subscriptionToken) return;
+    node.subscribed = false;
+    console.warn(`terminal subscribe failed for ${node.paneId}:`, error);
+  }
+}
+
+function unsubscribePane(node) {
+  if (!isWebTransport || !node.subscribed) return;
+  node.subscribed = false;
+  node.subscriptionToken += 1;
+  void bridge.unsubscribeTerminal({ paneId: node.paneId }).catch(() => {});
+}
+
+function syncPaneActivity() {
+  for (const node of paneNodeMap.values()) {
+    const pageActive = !document.hidden;
+    const focused = node.paneId === focusedPaneId && pageActive;
+    if (node.terminal.options.cursorBlink !== focused) {
+      node.terminal.options.cursorBlink = focused;
+    }
+    if (pageActive) {
+      void subscribePane(node);
+    } else {
+      unsubscribePane(node);
+    }
+    if (focused) {
+      enableWebgl(node);
+    } else {
+      disableWebgl(node);
+    }
+  }
+}
+
+function initializePaneTerminal(node) {
+  if (node.disposed) return Promise.resolve();
+  if (node.initializingPromise) return node.initializingPromise;
+  const promise = (async () => {
+    fitTerminal(node, true);
+    try {
+      const result = await bridge.createTerminal({
+        paneId: node.paneId,
+        cols: node.terminal.cols,
+        rows: node.terminal.rows,
+        cwd: node.cwd,
+      });
+      const hadAttachedSession = node.hasAttachedSession;
+      if (isWebTransport) {
+        // First attachment needs the retained history. On a transport-only
+        // reconnect, preserve nextSeq and request only the missing suffix. If
+        // the service restarted, createTerminal returns a new PTY and the old
+        // browser screen must be cleared before subscribing from sequence 0.
+        if (!hadAttachedSession || !result?.reattached) {
+          if (hadAttachedSession) await resetTerminalForSubscription(node, 0);
+          node.nextSeq = 0;
+        }
+      } else {
+        node.nextSeq = Number.isSafeInteger(result?.outputSeq) ? result.outputSeq : 0;
+      }
+      node.hasAttachedSession = true;
+      node.sessionReady = true;
+      fitTerminal(node, true);
+      syncPaneActivity();
+      updateStatus();
+    } catch (error) {
+      reportError(error);
+    }
+  })();
+  node.initializingPromise = promise;
+  return promise.finally(() => {
+    if (node.initializingPromise === promise) node.initializingPromise = null;
+  });
 }
 
 function ensurePaneNodes() {
@@ -586,10 +834,12 @@ function ensurePaneNodes() {
 
   for (const [paneId, node] of paneNodeMap.entries()) {
     if (!activeIds.has(paneId)) {
-      bridge.destroyTerminal({ paneId });
+      unsubscribePane(node);
+      disableWebgl(node);
       if (node.resizeTimer !== null) {
         window.clearTimeout(node.resizeTimer);
       }
+      disposeTerminalNode(node);
       node.terminal.dispose();
       node.root.remove();
       paneNodeMap.delete(paneId);
@@ -902,6 +1152,7 @@ function renderPanes(refit = false) {
 function render(refit = false) {
   renderTabs();
   renderPanes(refit);
+  syncPaneActivity();
   updateStatus();
 }
 
@@ -1120,6 +1371,11 @@ function updateStatus() {
   }
 
   statusLabelEl.classList.remove('is-navigation-mode');
+  if (!focusedPane) {
+    statusLabelEl.textContent = 'No terminals';
+    statusHintEl.textContent = 'Open a new terminal to continue';
+    return;
+  }
   statusLabelEl.textContent = `Focused: ${getPaneLabel(focusedPane) || focusedPane.id}`;
   statusHintEl.textContent = 'Ctrl+B to enter navigation mode';
 }
@@ -1330,6 +1586,14 @@ window.addEventListener('resize', () => {
   }, WINDOW_RESIZE_DEBOUNCE_MS);
 });
 
+document.addEventListener('visibilitychange', () => {
+  syncPaneActivity();
+  if (!document.hidden) {
+    const node = paneNodeMap.get(focusedPaneId);
+    if (node) requestAnimationFrame(() => fitTerminal(node, true));
+  }
+});
+
 window.addEventListener('DOMContentLoaded', async () => {
   try {
     applyPersistedSettings(await bridge.loadSettings());
@@ -1344,10 +1608,17 @@ window.addEventListener('beforeunload', () => {
   if (windowResizeTimer !== null) {
     window.clearTimeout(windowResizeTimer);
   }
+  if (pendingLayoutFrame !== null) {
+    cancelAnimationFrame(pendingLayoutFrame);
+  }
   flushSettingsSave();
   removeTerminalDataListener();
   removeTerminalExitListener();
   removeMenuActionListener();
+  removeLayoutListener?.();
+  removeClientsListener?.();
+  removeResyncListener?.();
+  removeConnectionListener?.();
 });
 
 window.addEventListener('error', (event) => {

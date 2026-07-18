@@ -21,7 +21,8 @@ URD 要求重连后能回到当前工作区。当前实现先保证服务进程�
 ## Behavioral Contract
 
 - 浏览器刷新或断线重连时，pane 布局由仍在运行的 SessionManager 提供。
-- 服务进程重启后，UI 设置恢复；pane 布局与 pty 会话不恢复。
+- 服务进程重启后，UI 设置恢复；已打开页面可按本地视图重建 pane，但服务端不持久化布局，
+  pty 会话及其中任务不恢复。
 - 设置文件损坏或缺失时回退到默认设置。
 
 ## Structural Contract

@@ -13,6 +13,8 @@ export const BIN_SCROLLBACK = 0x73; // server->client: reattach-scrollback repla
 // --- control ops (text frames), aligned with window.vibe99 method names ---
 export const OPS = {
   TERMINAL_CREATE: 'terminal-create',
+  TERMINAL_SUBSCRIBE: 'terminal-subscribe',
+  TERMINAL_UNSUBSCRIBE: 'terminal-unsubscribe',
   TERMINAL_RESIZE: 'terminal-resize',
   TERMINAL_DESTROY: 'terminal-destroy',
   WINDOW_CLOSE: 'window-close',
@@ -32,6 +34,7 @@ export const EVENTS = {
   MENU_ACTION: 'menu-action',
   LAYOUT: 'layout',
   CLIENTS: 'clients',
+  TERMINAL_RESYNC_REQUIRED: 'terminal-resync-required',
 };
 
 let _seq = 0;
@@ -64,7 +67,7 @@ export function decodeTextFrame(str) {
 // --- binary frame codec ---
 export function encodeBinary(op, paneId, data) {
   const paneIdBytes = Buffer.from(String(paneId), 'utf8');
-  const dataBytes = Buffer.from(data, 'utf8');
+  const dataBytes = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
   const buf = Buffer.allocUnsafe(1 + 2 + paneIdBytes.length + dataBytes.length);
   buf.writeUInt8(op, 0);
   buf.writeUInt16BE(paneIdBytes.length, 1);

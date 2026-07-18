@@ -20,8 +20,8 @@ HLD 跨边界决策：单一持久实时通道；鉴权在边缘统一进行。�
 ## Behavioral Contract
 
 - 握手阶段拒绝未鉴权连接。
-- 把客户端请求（terminal-create/write/resize/destroy、settings、clipboard/menu 降级操作）路由到对应模块。
-- 把会话事件（terminal data、terminal exit、layout、clients）回送到发起方或广播给全部客户端。
+- 把客户端请求（terminal-create/subscribe/unsubscribe/write/resize/destroy、settings、clipboard/menu 降级操作）路由到对应模块。
+- 控制事件广播给全部客户端；终端数据只发送给订阅对应 pane 的客户端。
 - 单个客户端断开不影响任何会话。
 
 ## Structural Contract
@@ -31,10 +31,12 @@ HLD 跨边界决策：单一持久实时通道；鉴权在边缘统一进行。�
 - 连接事件：`'connect'(conn)`、`'disconnect'(conn)`、`'message'(conn, msg)`
 - 出站：`send(conn, msg)`、`broadcast(paneId, msg)`
 - 报文封装镜像遗留 `window.vibe99` 操作：
-  - 文本请求：`terminal-create`、`terminal-resize`、`terminal-destroy`、`settings-load`、`settings-save`
-  - 文本事件：`hello`、`terminal-exit`、`layout`、`clients`
+  - 文本请求：`terminal-create`、`terminal-subscribe`、`terminal-unsubscribe`、`terminal-resize`、`terminal-destroy`、`settings-load`、`settings-save`
+  - 文本事件：`hello`、`terminal-exit`、`layout`、`clients`、`terminal-resync-required`
   - 二进制帧：terminal write/data、reattach scrollback
 
 > 传输：WebSocket；终端数据用二进制帧。
 
-> **Phase 2 更新（多客户端）**：持有**客户端集合**（非单个）；输出/`layout`/`clients` 广播给全部客户端；新连接发送 `hello`+完整 `layout`+每 pane 的 scrollback；移除"新连接踢旧的"；心跳 ping 检测死连接；**尺寸协调**——跟踪每客户端最近 cols×rows，取 min 调 SessionManager.resize（ADR-005）；定期/事件推送 `clients`（id/名称/地址）供状态栏显示（ADR-003 自由写入）。
+> **Phase 3 更新（按需订阅）**：新连接先接收 `hello`+完整 `layout`；可见页面订阅全部 pane，
+> 以 byte sequence 增量追赶缺失输出。页面隐藏时退订全部 pane。发送队列有背压和硬上限，
+> 慢客户端超限后收到 `terminal-resync-required`。只有订阅客户端参与该 pane 的最小尺寸协调。

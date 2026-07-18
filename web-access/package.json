@@ -13,6 +13,8 @@
     "start": "node server/index.js",
     "start:web": "node server/index.js",
     "smoke:session": "node server/smoke-session.js",
+    "smoke:history": "node server/smoke-history.js",
+    "smoke:gateway": "node server/smoke-gateway.js",
     "smoke:ws": "node server/smoke-ws.js",
     "smoke:multi": "node server/smoke-ws-multi.js"
   },
